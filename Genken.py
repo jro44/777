@@ -127,71 +127,68 @@ st.markdown("""
 st.markdown("""
 <div class="wanted-poster">
     <h3>⚠ OSTRZEŻENIE SZERYFA ⚠</h3>
-    <p>Ta maszyna używa <b>szybkiego scrapingu</b> (Multipasko dla Keno/600),
-    by zdobyć wyniki niemal natychmiast po losowaniu.</p>
+    <p>Ta maszyna łączy się z zewnętrzną bazą danych (WynikiLotto),
+    aby pobrać historię losowań.</p>
     <p>Mimo to, pamiętaj: <b>Dom (Kasyno) zawsze ma przewagę.</b></p>
     <p>Aplikacja stosuje matematykę do redukcji ryzyka, ale nie gwarantuje wygranej.</p>
 </div>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 🧠 KONFIGURACJA GIER I URLI (HYBRYDA)
+# 🧠 KONFIGURACJA GIER I URLI (STABILNA)
 # ==============================================================================
+
+# Wszystkie gry przekierowane na stabilne źródło (wynikilotto.net.pl)
+# Multipasko generowało błędy 404, więc zostało usunięte dla stabilności.
 
 GAME_CONFIG = {
     "Keno": {
-        "url": "https://www.multipasko.pl/wyniki-keno/",
-        "source": "multipasko",
+        "url": "https://www.wynikilotto.net.pl/keno/wyniki/",
         "range": 70, "pick": 10, "sum_min": 200, "sum_max": 500, "has_bonus": False
     },
     "Szybkie 600": {
-        "url": "https://www.multipasko.pl/wyniki-szybkie-600/",
-        "source": "multipasko",
+        "url": "https://www.wynikilotto.net.pl/szybkie-600/wyniki/",
         "range": 32, "pick": 6, "sum_min": 75, "sum_max": 125, "has_bonus": False
     },
     "Lotto": {
         "url": "https://www.wynikilotto.net.pl/lotto/wyniki/",
-        "source": "standard",
         "range": 49, "pick": 6, "sum_min": 100, "sum_max": 200, "has_bonus": False
     },
     "Lotto Plus": {
         "url": "https://www.wynikilotto.net.pl/lotto-plus/wyniki/",
-        "source": "standard",
         "range": 49, "pick": 6, "sum_min": 100, "sum_max": 200, "has_bonus": False
     },
     "Mini Lotto": {
         "url": "https://www.wynikilotto.net.pl/mini-lotto/wyniki/",
-        "source": "standard",
         "range": 42, "pick": 5, "sum_min": 85, "sum_max": 135, "has_bonus": False
     },
     "EuroJackpot": {
         "url": "https://www.wynikilotto.net.pl/eurojackpot/wyniki/",
-        "source": "standard",
         "range": 50, "pick": 5, "sum_min": 95, "sum_max": 160, 
         "has_bonus": True, "bonus_range": 12, "bonus_pick": 2
     },
     "Multi Multi": {
         "url": "https://www.wynikilotto.net.pl/multi-multi/wyniki/",
-        "source": "standard",
         "range": 80, "pick": 10, "sum_min": 250, "sum_max": 550, "has_bonus": False
     },
     "Ekstra Pensja": {
         "url": "https://www.wynikilotto.net.pl/ekstra-pensja/wyniki/",
-        "source": "standard",
         "range": 35, "pick": 5, "sum_min": 60, "sum_max": 120, 
         "has_bonus": True, "bonus_range": 4, "bonus_pick": 1
     }
 }
 
 # ==============================================================================
-# 🔌 SCRAPER (INTELIGENTNE POBIERANIE)
+# 🔌 SCRAPER (JEDNOLITY)
 # ==============================================================================
 
-@st.cache_data(ttl=60) 
+@st.cache_data(ttl=60) # Odświeżanie co minutę
 def fetch_from_scraper(game_name):
+    """
+    Pobiera wyniki ze strony www.wynikilotto.net.pl
+    """
     config = GAME_CONFIG[game_name]
     url = config["url"]
-    source_type = config["source"]
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36"
@@ -199,63 +196,53 @@ def fetch_from_scraper(game_name):
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
+        response.raise_for_status() # Tu wyłapiemy ewentualne 404
+        
         soup = BeautifulSoup(response.text, 'html.parser')
         draws = []
         
-        # --- PARSER DLA MULTIPASKO (Keno / 600) ---
-        if source_type == "multipasko":
-            tables = soup.find_all('table')
-            target_table = None
+        # Standardowy parser dla wynikilotto.net.pl
+        rows = soup.find_all('tr')
+        for row in rows:
+            text = row.get_text(separator=' ')
+            # Szukamy daty
+            date_match = re.search(r'\d{2}\.\d{2}\.\d{4}', text)
             
-            for tab in tables:
-                if "wyniki" in str(tab).lower() or len(tab.find_all('td')) > 20:
-                    target_table = tab
-                    break
+            # Jeśli wiersz nie ma daty, szukamy godziny (dla Keno/600 dzisiaj)
+            if date_match:
+                date_str = date_match.group(0)
+            else:
+                time_match = re.search(r'\d{2}:\d{2}', text)
+                if time_match:
+                     date_str = f"Dziś {time_match.group(0)}"
+                else:
+                     continue # Pomiń wiersz bez czasu
             
-            if target_table:
-                rows = target_table.find_all('tr')
-                for row in rows:
-                    txt = row.get_text(separator=" ").strip()
-                    nums_found = [int(s) for s in re.findall(r'\b\d+\b', txt)]
-                    valid = [n for n in nums_found if 1 <= n <= config["range"]]
-                    
-                    if len(valid) >= config["pick"]:
-                        if game_name == "Keno":
-                             result = list(dict.fromkeys(valid[-20:]))
-                        else:
-                             result = valid[-config["pick"]:]
-                        
-                        if len(result) >= config["pick"]:
-                            time_match = re.search(r'\d{2}:\d{2}', txt)
-                            date_time = time_match.group(0) if time_match else "Dziś"
-                            draws.append({
-                                "date": date_time,
-                                "numbers": result
-                            })
-
-        # --- PARSER STANDARDOWY (Reszta gier) ---
-        else:
-            rows = soup.find_all('tr')
-            for row in rows:
-                text = row.get_text(separator=' ')
-                date_match = re.search(r'\d{2}\.\d{2}\.\d{4}', text)
-                date_str = date_match.group(0) if date_match else "Data"
+            # Szukamy liczb
+            numbers = [int(n) for n in re.findall(r'\b\d+\b', text)]
+            
+            # Filtrujemy liczby z zakresu gry
+            valid_nums = [n for n in numbers if 1 <= n <= config["range"]]
+            
+            # Określamy ile liczb potrzebujemy
+            min_req = config["pick"] + (config["bonus_pick"] if config["has_bonus"] else 0)
+            
+            if len(valid_nums) >= min_req:
+                # Jeśli Keno (ma 20 wyników), a my gramy na 10 - algorytm i tak potrzebuje bazy 20 wylosowanych
+                if game_name == "Keno":
+                     # Keno losuje 20 liczb. Bierzemy ostatnie 20 z wiersza.
+                     result = list(dict.fromkeys(valid_nums[-20:]))
+                else:
+                     # Inne gry - bierzemy tyle ile się losuje
+                     total_balls = config["pick"] + (config["bonus_pick"] if config["has_bonus"] else 0)
+                     result = valid_nums[-total_balls:]
                 
-                numbers = [int(n) for n in re.findall(r'\b\d+\b', text)]
-                valid_nums = [n for n in numbers if 1 <= n <= config["range"]]
-                
-                min_req = config["pick"] + (config["bonus_pick"] if config["has_bonus"] else 0)
-                
-                if len(valid_nums) >= min_req:
-                    total_balls = config["pick"] + (config["bonus_pick"] if config["has_bonus"] else 0)
-                    result = valid_nums[-total_balls:]
-                    
-                    if len(result) >= config["pick"]:
-                        draws.append({
-                            "date": date_str,
-                            "numbers": result
-                        })
+                # Sprawdzenie ostateczne
+                if len(result) >= config["pick"]:
+                    draws.append({
+                        "date": date_str,
+                        "numbers": result
+                    })
 
         return draws, None
 
@@ -274,6 +261,7 @@ def smart_generator(draws, game_name):
     if draws:
         all_nums = [n for d in draws for n in d['numbers']]
         counts = Counter(all_nums)
+        # Wzmacniamy liczby częste
         weights = [(counts.get(i, 0) + 1)**1.5 for i in population]
     else:
         weights = [1] * len(population)
@@ -329,14 +317,13 @@ with tab_gen:
     st.markdown("<h1 style='text-align: center;'>SALOON LOTTO 777</h1>", unsafe_allow_html=True)
     
     selected_game = st.selectbox("Wybierz grę:", list(GAME_CONFIG.keys()))
-    source_info = "Źródło: Multipasko (Turbo)" if GAME_CONFIG[selected_game]["source"] == "multipasko" else "Źródło: Standard"
     
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
         st.markdown(f"""
         <div class="slot-machine">
             <h2 style="margin:0;">{selected_game.upper()}</h2>
-            <p style="color:#aaa;">{source_info}</p>
+            <p style="color:#aaa;">Baza: WynikiLotto</p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -357,7 +344,7 @@ with tab_gen:
                 
                 html = ""
                 for n in main_nums:
-                    # UŻYWAMY BEZPIECZNEGO ZAPISU POTRÓJNEGO CUDZYSŁOWU
+                    # BEZPIECZNY ZAPIS
                     html += f"""<div class='ball'>{n}</div>"""
                 st.markdown(html, unsafe_allow_html=True)
                 
@@ -365,7 +352,6 @@ with tab_gen:
                     st.markdown("<h3 style='margin:10px; color:#cd5c5c;'>+ BONUS +</h3>", unsafe_allow_html=True)
                     html_spec = ""
                     for n in spec_nums:
-                        # UŻYWAMY BEZPIECZNEGO ZAPISU POTRÓJNEGO CUDZYSŁOWU
                         html_spec += f"""<div class='ball ball-euro'>{n}</div>"""
                     st.markdown(html_spec, unsafe_allow_html=True)
                     
@@ -376,7 +362,7 @@ with tab_gen:
                 c1.metric("Baza Danych", f"{len(draws)} losowań")
                 if len(draws) > 0:
                     last_draw_time = draws[0]['date']
-                    c2.metric("Ostatnie Losowanie", last_draw_time)
+                    c2.metric("Ostatnie", last_draw_time)
                 c3.metric("Suma", sum(main_nums))
 
 # --- ZAKŁADKA 2 ---
@@ -404,5 +390,5 @@ with tab_res:
                     """, unsafe_allow_html=True)
 
 st.markdown("---")
-st.markdown("<div style='text-align: center; color: #888; font-size: 12px;'>Saloon Lotto 777 © 2024 | Turbo Scraper Edition</div>", unsafe_allow_html=True)
+st.markdown("<div style='text-align: center; color: #888; font-size: 12px;'>Saloon Lotto 777 © 2024 | Stable Edition</div>", unsafe_allow_html=True)
     
