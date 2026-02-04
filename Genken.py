@@ -138,8 +138,6 @@ st.markdown("""
 # 🧠 KONFIGURACJA GIER I URLI (HYBRYDA)
 # ==============================================================================
 
-# Keno i Szybkie 600 idą przez Multipasko (Szybki update)
-# Reszta przez WynikiLotto (Standard)
 GAME_CONFIG = {
     "Keno": {
         "url": "https://www.multipasko.pl/wyniki-keno/",
@@ -189,12 +187,8 @@ GAME_CONFIG = {
 # 🔌 SCRAPER (INTELIGENTNE POBIERANIE)
 # ==============================================================================
 
-# Zmieniamy TTL na 60 sekund dla gier szybkich
 @st.cache_data(ttl=60) 
 def fetch_from_scraper(game_name):
-    """
-    Pobiera wyniki. Rozróżnia źródło Multipasko (szybkie) od Standardowego.
-    """
     config = GAME_CONFIG[game_name]
     url = config["url"]
     source_type = config["source"]
@@ -211,12 +205,9 @@ def fetch_from_scraper(game_name):
         
         # --- PARSER DLA MULTIPASKO (Keno / 600) ---
         if source_type == "multipasko":
-            # Multipasko ma specyficzną strukturę tabeli
-            # Szukamy tabeli z wynikami
             tables = soup.find_all('table')
             target_table = None
             
-            # Szukamy tabeli, która ma dużo liczb w środku
             for tab in tables:
                 if "wyniki" in str(tab).lower() or len(tab.find_all('td')) > 20:
                     target_table = tab
@@ -226,32 +217,18 @@ def fetch_from_scraper(game_name):
                 rows = target_table.find_all('tr')
                 for row in rows:
                     txt = row.get_text(separator=" ").strip()
-                    # Szukamy liczb w wierszu
                     nums_found = [int(s) for s in re.findall(r'\b\d+\b', txt)]
-                    
-                    # Filtrujemy liczby pasujące do zakresu gry
                     valid = [n for n in nums_found if 1 <= n <= config["range"]]
                     
-                    # Keno: 20 liczb, Szybkie 600: 6 liczb
-                    # Multipasko często podaje ID losowania i datę, potem wyniki
                     if len(valid) >= config["pick"]:
-                        # Bierzemy ostatnie N liczb z wiersza jako wynik
-                        # (zakładamy, że ID i Data są na początku)
-                        
-                        # Fix dla Keno (zawsze 20 liczb unikalnych)
                         if game_name == "Keno":
-                             # Czasem data zawiera liczby z zakresu, więc bierzemy unikalne i sortujemy
-                             # Keno w multipasko jest czytelne, zazwyczaj ostatnie 20 to wynik
-                             result = list(dict.fromkeys(valid[-20:])) # Usuwa duplikaty zachowując kolejność
+                             result = list(dict.fromkeys(valid[-20:]))
                         else:
                              result = valid[-config["pick"]:]
                         
-                        # Sprawdzenie czy mamy komplet
                         if len(result) >= config["pick"]:
-                            # Próba wyciągnięcia daty/godziny
                             time_match = re.search(r'\d{2}:\d{2}', txt)
                             date_time = time_match.group(0) if time_match else "Dziś"
-                            
                             draws.append({
                                 "date": date_time,
                                 "numbers": result
@@ -271,7 +248,6 @@ def fetch_from_scraper(game_name):
                 min_req = config["pick"] + (config["bonus_pick"] if config["has_bonus"] else 0)
                 
                 if len(valid_nums) >= min_req:
-                    # Dla standardowych gier bierzemy końcówkę
                     total_balls = config["pick"] + (config["bonus_pick"] if config["has_bonus"] else 0)
                     result = valid_nums[-total_balls:]
                     
@@ -381,11 +357,52 @@ with tab_gen:
                 
                 html = ""
                 for n in main_nums:
-                    html += f"<div class='ball'>{n}</div>"
+                    # UŻYWAMY BEZPIECZNEGO ZAPISU POTRÓJNEGO CUDZYSŁOWU
+                    html += f"""<div class='ball'>{n}</div>"""
                 st.markdown(html, unsafe_allow_html=True)
                 
                 if spec_nums:
                     st.markdown("<h3 style='margin:10px; color:#cd5c5c;'>+ BONUS +</h3>", unsafe_allow_html=True)
                     html_spec = ""
                     for n in spec_nums:
-                        html_spec += f"<div class='
+                        # UŻYWAMY BEZPIECZNEGO ZAPISU POTRÓJNEGO CUDZYSŁOWU
+                        html_spec += f"""<div class='ball ball-euro'>{n}</div>"""
+                    st.markdown(html_spec, unsafe_allow_html=True)
+                    
+                st.markdown("</div>", unsafe_allow_html=True)
+                
+                st.markdown("---")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Baza Danych", f"{len(draws)} losowań")
+                if len(draws) > 0:
+                    last_draw_time = draws[0]['date']
+                    c2.metric("Ostatnie Losowanie", last_draw_time)
+                c3.metric("Suma", sum(main_nums))
+
+# --- ZAKŁADKA 2 ---
+with tab_res:
+    st.markdown("### 📜 WYNIKI Z SIECI")
+    
+    res_game = st.selectbox("Pokaż wyniki dla:", list(GAME_CONFIG.keys()), key="res")
+    
+    if st.button("🔄 Odśwież Tabelę"):
+        with st.spinner("Pobieranie..."):
+            draws, error = fetch_from_scraper(res_game)
+            
+            if error:
+                st.error(error)
+            elif not draws:
+                st.warning("Nie znaleziono wyników. Strona może być niedostępna.")
+            else:
+                for d in draws[:10]:
+                    nums_str = ", ".join([str(n) for n in d['numbers']])
+                    st.markdown(f"""
+                    <div class="result-row">
+                        <div style="color: #e6b800; font-size: 0.8em;">🕒 {d['date']}</div>
+                        <div style="font-size: 1.1em; font-weight: bold;">{nums_str}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+st.markdown("---")
+st.markdown("<div style='text-align: center; color: #888; font-size: 12px;'>Saloon Lotto 777 © 2024 | Turbo Scraper Edition</div>", unsafe_allow_html=True)
+    
