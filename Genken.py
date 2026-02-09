@@ -18,10 +18,9 @@ st.set_page_config(
 )
 
 # ==============================================================================
-# 🎨 STYL WESTERN (CSS) - POPRAWIONE FORMATOWANIE
+# 🎨 STYL WESTERN (CSS)
 # ==============================================================================
 
-# Używamy zwykłego potrójnego cudzysłowu (bez 'f' na początku), aby uniknąć błędów
 st.markdown("""
     <style>
     /* TŁO I CZCIONKI */
@@ -120,7 +119,7 @@ st.markdown("""
         border-radius: 4px;
     }
     
-    /* Metryki */
+    /* METRYKI */
     div[data-testid="stMetricValue"] {
         color: #e6b800;
     }
@@ -135,7 +134,7 @@ st.markdown("""
 <div class="wanted-poster">
     <h3>⚠ SYSTEM DELTA ACTIVATED (Trend 100) ⚠</h3>
     <p>Wdrożono protokół: <b>Analiza Odstępów (Delta)</b> na bazie ostatnich <b>100 losowań</b>.</p>
-    <p>Algorytm analizuje nie tylko jakie liczby padły, ale w jakich odstępach.</p>
+    <p>Algorytm analizuje wyłącznie świeże dane (Hot Trends).</p>
     <p>Pamiętaj: Dom zawsze ma przewagę. Graj odpowiedzialnie.</p>
 </div>
 """, unsafe_allow_html=True)
@@ -256,7 +255,8 @@ def advanced_smart_generator(draws, game_name):
     config = GAME_CONFIG[game_name]
     population = list(range(1, config["range"] + 1))
     
-    # --- ZMIANA: OGRANICZENIE DO OSTATNICH 100 LOSOWAŃ ---
+    # --- TUTAJ JEST LIMIT 100 LOSOWAŃ ---
+    # Jeśli danych jest więcej, ucinamy do 100.
     analysis_data = draws[:100] if draws else []
     
     # --- 1. ANALIZA WAG (HOT/COLD) ---
@@ -277,8 +277,9 @@ def advanced_smart_generator(draws, game_name):
         candidates = set()
         
         # A) MECHANIZM POWTÓRZEŃ (REPETITION)
+        # Dla gier szybkich (Keno, Multi, 600) forsujemy 1-2 liczby z poprzedniego losowania
         if game_name in ["Keno", "Multi Multi", "Szybkie 600"] and last_draw_nums:
-            if random.random() < 0.6: 
+            if random.random() < 0.6: # 60% szans
                 repeats = random.sample(last_draw_nums, k=random.randint(1, 2))
                 valid_repeats = [r for r in repeats if r in population]
                 candidates.update(valid_repeats[:2]) 
@@ -295,8 +296,9 @@ def advanced_smart_generator(draws, game_name):
         # 1. FILTR DELTA (ODSTĘPY)
         if config["pick"] <= 10:
             deltas = [nums[i+1] - nums[i] for i in range(len(nums)-1)]
-            if all(d <= 2 for d in deltas): continue # Zbyt ciasno
-            if all(d > 15 for d in deltas): continue # Zbyt luźno
+            # Odrzucamy nienaturalnie ciasne lub luźne układy
+            if all(d <= 2 for d in deltas): continue 
+            if all(d > 15 for d in deltas): continue 
         
         # 2. FILTR SUMY
         if game_name != "Keno":
@@ -335,6 +337,7 @@ def advanced_smart_generator(draws, game_name):
         bonus_pop = list(range(1, config["bonus_range"] + 1))
         special_set = sorted(random.sample(bonus_pop, config["bonus_pick"]))
         
+    # Zwracamy też ile danych faktycznie przeanalizowaliśmy (max 100)
     return best_set, special_set, len(analysis_data)
 
 # ==============================================================================
@@ -368,15 +371,14 @@ with tab_gen:
             if error:
                 st.error(f"Błąd sieci: {error}")
             else:
-                with st.spinner("Symulacja wariantów na podstawie 100 ostatnich gier..."):
-                    # Tu zwracamy też liczbę faktycznie przeanalizowanych losowań
+                with st.spinner("Symulacja wariantów na podstawie ostatnich 100 gier..."):
                     main_nums, spec_nums, analyzed_count = advanced_smart_generator(draws, selected_game)
                 
                 st.markdown("<div style='text-align: center; margin-top: 20px;'>", unsafe_allow_html=True)
                 
                 html = ""
                 for n in main_nums:
-                    # Używamy potrójnego cudzysłowu dla bezpieczeństwa
+                    # Poprawione cudzysłowy, aby nie powodowały błędu TokenError
                     html += f"""<div class='ball'>{n}</div>"""
                 st.markdown(html, unsafe_allow_html=True)
                 
