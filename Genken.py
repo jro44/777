@@ -132,8 +132,8 @@ st.markdown("""
 
 st.markdown("""
 <div class="wanted-poster">
-    <h3>⚠ SYSTEM ANALIZY KOLUMNOWEJ (FINAL) ⚠</h3>
-    <p>Zastosowano: <b>Separacja Kolumnowa</b> (Precyzja 100% dla wyników).</p>
+    <h3>⚠ SYSTEM ANALIZY KOLUMNOWEJ (MULTI FIX) ⚠</h3>
+    <p>Naprawiono pobieranie wyników dla Multi Multi (pełne 20 kul).</p>
     <p>Baza: <b>Ostatnie 100 losowań</b> | Metoda: <b>Delta + Repetition</b>.</p>
     <p>Pamiętaj: Dom zawsze ma przewagę. Graj odpowiedzialnie.</p>
 </div>
@@ -188,7 +188,7 @@ GAME_CONFIG = {
 def fetch_from_scraper(game_name):
     """
     Pobiera wyniki iterując po KOLUMNACH (td), aby oddzielić daty od wyników.
-    Działa niezależnie od formatowania tekstu w wierszu.
+    Naprawiono logikę dla Multi Multi (pobiera 20 liczb).
     """
     config = GAME_CONFIG[game_name]
     url = config["url"]
@@ -227,8 +227,6 @@ def fetch_from_scraper(game_name):
                     continue # Nie ma daty ani godziny -> śmieciowy wiersz
             
             # --- 2. Znajdź Kolumnę z Wynikami ---
-            # Skanujemy każdą komórkę, aby znaleźć tę z największą liczbą poprawnych kul.
-            
             best_candidate_nums = []
             max_valid_count = 0
             
@@ -239,25 +237,33 @@ def fetch_from_scraper(game_name):
                 # Przefiltruj liczby (zakres gry)
                 valid_in_cell = [n for n in nums_in_cell if 1 <= n <= config["range"]]
                 
-                # Jeśli ta komórka ma więcej poprawnych liczb niż poprzednie, to jest nasz kandydat
+                # Szukamy kolumny z największą liczbą pasujących kul
                 if len(valid_in_cell) > max_valid_count:
                     max_valid_count = len(valid_in_cell)
                     best_candidate_nums = valid_in_cell
             
             # --- 3. Weryfikacja ---
-            min_req = config["pick"] # Ile liczb potrzebujemy minimum
+            min_req = config["pick"]
+            
+            # Zwiększamy wymagania dla Multi Multi, żeby złapał poprawną kolumnę (20 kul)
+            if game_name == "Multi Multi":
+                min_req = 15 # Multi ma 20 kul, więc kolumna musi mieć ich dużo
             
             if max_valid_count >= min_req:
-                # Logika dla Keno (20 liczb w wyniku -> bierzemy 20 unikalnych)
-                if game_name == "Keno":
+                # Logika dla gier z 20 kulami (Keno, Multi Multi)
+                if game_name in ["Keno", "Multi Multi"]:
+                    # Bierzemy ostatnie 20 unikalnych liczb
                     final_result = list(dict.fromkeys(best_candidate_nums[-20:]))
                 else:
-                    # Logika dla innych (Lotto 6, Euro 5+2) - bierzemy ostatnie X liczb z komórki
+                    # Logika dla innych (Lotto 6, Euro 5+2)
                     total_needed = config["pick"] + (config["bonus_pick"] if config["has_bonus"] else 0)
                     final_result = best_candidate_nums[-total_needed:]
                 
                 # Zabezpieczenie przed pustymi/niepełnymi
-                if len(final_result) >= config["pick"]:
+                # Dla Multi Multi i Keno sprawdzamy czy mamy 20 liczb w bazie
+                expected_len = 20 if game_name in ["Keno", "Multi Multi"] else config["pick"]
+                
+                if len(final_result) >= expected_len:
                     draws.append({
                         "date": date_str,
                         "numbers": final_result
@@ -298,6 +304,7 @@ def advanced_smart_generator(draws, game_name):
         # A) REPETITION (Powtórki dla gier szybkich)
         if game_name in ["Keno", "Multi Multi", "Szybkie 600"] and last_draw_nums:
             if random.random() < 0.6: 
+                # Losujemy powtórki z ostatniego wyniku (który dla Multi ma 20 liczb)
                 repeats = random.sample(last_draw_nums, k=random.randint(1, 2))
                 valid_repeats = [r for r in repeats if r in population]
                 candidates.update(valid_repeats[:2]) 
@@ -317,8 +324,8 @@ def advanced_smart_generator(draws, game_name):
             if all(d <= 2 for d in deltas): continue # Za ciasno
             if all(d > 15 for d in deltas): continue # Za luźno
         
-        # 2. SUMA
-        if game_name != "Keno":
+        # 2. SUMA (Pomiń dla Keno i Multi, bo tam losujemy 10 z 80/70, suma jest bardzo zmienna)
+        if game_name not in ["Keno", "Multi Multi"]:
             s_sum = sum(nums)
             if not (config["sum_min"] <= s_sum <= config["sum_max"]): continue
             
@@ -430,14 +437,18 @@ with tab_res:
             elif not draws:
                 st.warning("Nie znaleziono wyników. Strona może być niedostępna.")
             else:
-                for d in draws[:10]:
+                # Wyświetlamy 20 wyników, żeby było widać Multi Multi w całości
+                for d in draws[:15]:
                     nums_str = ", ".join([str(n) for n in d['numbers']])
+                    # Liczymy ile kul, żeby upewnić się że Multi Multi ma 20
+                    count = len(d['numbers'])
+                    
                     st.markdown(f"""
                     <div class="result-row">
-                        <div style="color: #e6b800; font-size: 0.8em;">🕒 {d['date']}</div>
+                        <div style="color: #e6b800; font-size: 0.8em;">🕒 {d['date']} (Liczb: {count})</div>
                         <div style="font-size: 1.1em; font-weight: bold;">{nums_str}</div>
                     </div>
                     """, unsafe_allow_html=True)
 
 st.markdown("---")
-st.markdown("<div style='text-align: center; color: #888; font-size: 12px;'>Saloon Lotto 777 © 2024 | Column Fix Edition</div>", unsafe_allow_html=True)
+st.markdown("<div style='text-align: center; color: #888; font-size: 12px;'>Generator losowań 777 © 2026 | 🏆 Winner Fix</div>", unsafe_allow_html=True)
