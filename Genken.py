@@ -132,15 +132,15 @@ st.markdown("""
 
 st.markdown("""
 <div class="wanted-poster">
-    <h3>⚠ SYSTEM DELTA ACTIVATED (Trend 100) ⚠</h3>
-    <p>Wdrożono protokół: <b>Analiza Odstępów (Delta)</b> na bazie ostatnich <b>100 losowań</b>.</p>
-    <p>Algorytm analizuje wyłącznie świeże dane (Hot Trends).</p>
+    <h3>⚠ SYSTEM TREND 100 (FIXED) ⚠</h3>
+    <p>Algorytm pobiera wyniki i <b>inteligentnie oddziela daty od liczb</b>.</p>
+    <p>Analiza: Ostatnie 100 losowań | Metoda: Delta + Repetition.</p>
     <p>Pamiętaj: Dom zawsze ma przewagę. Graj odpowiedzialnie.</p>
 </div>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 🧠 KONFIGURACJA GIER I URLI (STABILNA)
+# 🧠 KONFIGURACJA GIER
 # ==============================================================================
 
 GAME_CONFIG = {
@@ -181,14 +181,11 @@ GAME_CONFIG = {
 }
 
 # ==============================================================================
-# 🔌 SCRAPER (JEDNOLITY)
+# 🔌 SCRAPER 2.0 (Z INTELIGENTNYM CZYSZCZENIEM)
 # ==============================================================================
 
-@st.cache_data(ttl=60) # Odświeżanie co minutę
+@st.cache_data(ttl=60)
 def fetch_from_scraper(game_name):
-    """
-    Pobiera wyniki ze strony www.wynikilotto.net.pl
-    """
     config = GAME_CONFIG[game_name]
     url = config["url"]
     
@@ -206,34 +203,46 @@ def fetch_from_scraper(game_name):
         rows = soup.find_all('tr')
         for row in rows:
             text = row.get_text(separator=' ')
-            # Szukamy daty
+            
+            # 1. Zidentyfikuj datę/godzinę (żeby ją wyświetlić)
             date_match = re.search(r'\d{2}\.\d{2}\.\d{4}', text)
+            time_match = re.search(r'\d{2}:\d{2}', text)
             
             if date_match:
                 date_str = date_match.group(0)
+            elif time_match:
+                date_str = f"Dziś {time_match.group(0)}"
             else:
-                time_match = re.search(r'\d{2}:\d{2}', text)
-                if time_match:
-                     date_str = f"Dziś {time_match.group(0)}"
-                else:
-                     continue 
+                continue # Jeśli wiersz nie ma daty ani godziny, to pewnie nagłówek
             
-            # Szukamy liczb
-            numbers = [int(n) for n in re.findall(r'\b\d+\b', text)]
+            # 2. INTELIGENTNE CZYSZCZENIE "ŚMIECI"
+            # Zanim zaczniemy szukać liczb, usuwamy z tekstu daty i godziny, 
+            # bo scraper myśli, że np. dzień "12" to wylosowana kula.
             
-            # Filtrujemy liczby z zakresu gry
+            clean_text = text
+            # Usuń daty (np. 12.05.2024)
+            clean_text = re.sub(r'\d{2}\.\d{2}\.\d{4}', '', clean_text)
+            # Usuń godziny (np. 14:00)
+            clean_text = re.sub(r'\d{2}:\d{2}', '', clean_text)
+            # Usuń duże liczby (ID losowania, np. 15432) - Kule mają max 2 cyfry (do 80)
+            clean_text = re.sub(r'\b\d{4,}\b', '', clean_text) 
+            
+            # 3. Pobierz czyste liczby z wyczyszczonego tekstu
+            numbers = [int(n) for n in re.findall(r'\b\d+\b', clean_text)]
+            
+            # 4. Filtrowanie zakresu gry
             valid_nums = [n for n in numbers if 1 <= n <= config["range"]]
             
-            min_req = config["pick"] + (config["bonus_pick"] if config["has_bonus"] else 0)
+            # 5. Wybieranie właściwych kul (zawsze bierzemy ostatnie X liczb)
+            total_balls_needed = config["pick"] + (config["bonus_pick"] if config["has_bonus"] else 0)
             
-            if len(valid_nums) >= min_req:
+            if len(valid_nums) >= total_balls_needed:
+                # Keno specyficznie - czasem pokazuje 20 liczb, a my bierzemy ostatnie 20
                 if game_name == "Keno":
-                     # Keno losuje 20 liczb. Bierzemy ostatnie 20 z wiersza.
+                     # Unikalne z końca (zabezpieczenie)
                      result = list(dict.fromkeys(valid_nums[-20:]))
                 else:
-                     # Inne gry - bierzemy tyle ile się losuje
-                     total_balls = config["pick"] + (config["bonus_pick"] if config["has_bonus"] else 0)
-                     result = valid_nums[-total_balls:]
+                     result = valid_nums[-total_balls_needed:]
                 
                 # Sprawdzenie ostateczne
                 if len(result) >= config["pick"]:
@@ -255,61 +264,56 @@ def advanced_smart_generator(draws, game_name):
     config = GAME_CONFIG[game_name]
     population = list(range(1, config["range"] + 1))
     
-    # --- TUTAJ JEST LIMIT 100 LOSOWAŃ ---
-    # Jeśli danych jest więcej, ucinamy do 100.
+    # LIMIT 100 LOSOWAŃ
     analysis_data = draws[:100] if draws else []
     
-    # --- 1. ANALIZA WAG (HOT/COLD) ---
+    # 1. HOT NUMBERS
     weights = [1.0] * len(population)
     if analysis_data:
         all_nums = [n for d in analysis_data for n in d['numbers']]
         counts = Counter(all_nums)
-        # Metoda "Power Weight": (Wystąpienia + 1)^1.6
         weights = [(counts.get(i, 0) + 1)**1.6 for i in population]
 
     best_set = []
     
-    # --- 2. PRZYGOTOWANIE "LICZB POWTARZALNYCH" ---
+    # 2. PRAWO POWTÓRZEŃ
     last_draw_nums = analysis_data[0]['numbers'] if analysis_data else []
     
-    # --- 3. SYMULACJA MONTE CARLO ---
+    # 3. SYMULACJA MONTE CARLO
     for _ in range(5000):
         candidates = set()
         
-        # A) MECHANIZM POWTÓRZEŃ (REPETITION)
-        # Dla gier szybkich (Keno, Multi, 600) forsujemy 1-2 liczby z poprzedniego losowania
+        # A) REPETITION
         if game_name in ["Keno", "Multi Multi", "Szybkie 600"] and last_draw_nums:
-            if random.random() < 0.6: # 60% szans
+            if random.random() < 0.6: 
                 repeats = random.sample(last_draw_nums, k=random.randint(1, 2))
                 valid_repeats = [r for r in repeats if r in population]
                 candidates.update(valid_repeats[:2]) 
 
-        # B) DOBIERANIE WAŻONE RESZTY
+        # B) RESZTA WAŻONA
         while len(candidates) < config["pick"]:
             c = random.choices(population, weights=weights, k=1)[0]
             candidates.add(c)
         
         nums = sorted(list(candidates))
         
-        # --- FILTRY ZAAWANSOWANE ---
-        
-        # 1. FILTR DELTA (ODSTĘPY)
+        # FILTRY
+        # 1. DELTA (dla małych zestawów)
         if config["pick"] <= 10:
             deltas = [nums[i+1] - nums[i] for i in range(len(nums)-1)]
-            # Odrzucamy nienaturalnie ciasne lub luźne układy
             if all(d <= 2 for d in deltas): continue 
             if all(d > 15 for d in deltas): continue 
         
-        # 2. FILTR SUMY
+        # 2. SUMA
         if game_name != "Keno":
             s_sum = sum(nums)
             if not (config["sum_min"] <= s_sum <= config["sum_max"]): continue
             
-        # 3. FILTR PARZYSTOŚCI
+        # 3. PARZYSTOŚĆ
         even = sum(1 for n in nums if n % 2 == 0)
         if even == 0 or even == config["pick"]: continue 
             
-        # 4. FILTR CIĄGÓW (Consecutive)
+        # 4. CONSECUTIVE
         cons_groups = 0
         current_seq = 0
         max_seq = 0
@@ -325,19 +329,16 @@ def advanced_smart_generator(draws, game_name):
         if max_seq >= 2: continue 
         if cons_groups > 1: continue 
         
-        # ZESTAW ZAAKCEPTOWANY
         best_set = nums
         break
         
     if not best_set: best_set = sorted(random.sample(population, config["pick"]))
         
-    # Bonusy (Euro/Ekstra)
     special_set = []
     if config["has_bonus"]:
         bonus_pop = list(range(1, config["bonus_range"] + 1))
         special_set = sorted(random.sample(bonus_pop, config["bonus_pick"]))
         
-    # Zwracamy też ile danych faktycznie przeanalizowaliśmy (max 100)
     return best_set, special_set, len(analysis_data)
 
 # ==============================================================================
@@ -365,20 +366,19 @@ with tab_gen:
         
         if st.button("🤠 OBLICZ NAJLEPSZY UKŁAD", use_container_width=True):
             
-            with st.spinner("Pobieranie danych (Analiza Trendu)..."):
+            with st.spinner("Pobieranie danych (Inteligentne Czyszczenie)..."):
                 draws, error = fetch_from_scraper(selected_game)
             
             if error:
                 st.error(f"Błąd sieci: {error}")
             else:
-                with st.spinner("Symulacja wariantów na podstawie ostatnich 100 gier..."):
+                with st.spinner("Analiza wariantów (Ostatnie 100 gier)..."):
                     main_nums, spec_nums, analyzed_count = advanced_smart_generator(draws, selected_game)
                 
                 st.markdown("<div style='text-align: center; margin-top: 20px;'>", unsafe_allow_html=True)
                 
                 html = ""
                 for n in main_nums:
-                    # Poprawione cudzysłowy, aby nie powodowały błędu TokenError
                     html += f"""<div class='ball'>{n}</div>"""
                 st.markdown(html, unsafe_allow_html=True)
                 
@@ -403,11 +403,12 @@ with tab_gen:
 # --- ZAKŁADKA 2 ---
 with tab_res:
     st.markdown("### 📜 WYNIKI Z SIECI")
+    st.caption("Sprawdź, czy wyniki zgadzają się z oficjalną stroną.")
     
     res_game = st.selectbox("Pokaż wyniki dla:", list(GAME_CONFIG.keys()), key="res")
     
     if st.button("🔄 Odśwież Tabelę"):
-        with st.spinner("Pobieranie..."):
+        with st.spinner("Pobieranie i czyszczenie danych..."):
             draws, error = fetch_from_scraper(res_game)
             
             if error:
@@ -425,4 +426,4 @@ with tab_res:
                     """, unsafe_allow_html=True)
 
 st.markdown("---")
-st.markdown("<div style='text-align: center; color: #888; font-size: 12px;'>Saloon Lotto 777 © 2024 | Delta + Trend 100 Edition</div>", unsafe_allow_html=True)
+st.markdown("<div style='text-align: center; color: #888; font-size: 12px;'>Saloon Lotto 777 © 2026 | Parser Fix Edition</div>", unsafe_allow_html=True)
