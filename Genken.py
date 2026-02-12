@@ -1,5 +1,5 @@
 import streamlit as st
-import requests
+import cloudscraper  # <-- ZMIANA: Używamy cloudscraper zamiast requests
 from bs4 import BeautifulSoup
 import random
 import re
@@ -7,7 +7,7 @@ from collections import Counter
 from datetime import datetime
 
 # ==============================================================================
-# ⚙️ KONFIGURACJA STRONY
+# 1. KONFIGURACJA STRONY
 # ==============================================================================
 
 st.set_page_config(
@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 # ==============================================================================
-# 🎨 STYL WESTERN (CSS)
+# 2. STYL WESTERN (CSS)
 # ==============================================================================
 
 st.markdown("""
@@ -127,78 +127,84 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 🤠 OSTRZEŻENIE NA START
+# 3. OSTRZEŻENIE NA START
 # ==============================================================================
 
 st.markdown("""
 <div class="wanted-poster">
-    <h3>⚠ SYSTEM ANALIZY KOLUMNOWEJ (FINAL) ⚠</h3>
-    <p>Zastosowano: <b>Separacja Kolumnowa</b> (Precyzja 100% dla wyników).</p>
+    <h3>⚠ SYSTEM CLOUDSCRAPER (415 BYPASS) ⚠</h3>
+    <p>Zastosowano: <b>Zaawansowane omijanie blokad (CloudScraper)</b>.</p>
     <p>Baza: <b>Ostatnie 100 losowań</b> | Metoda: <b>Delta + Repetition</b>.</p>
-    <p>Pamiętaj: Dom zawsze ma przewagę. Graj odpowiedzialnie.</p>
+    <p>Pamiętaj: Dom (Kasyno) zawsze ma przewagę. Graj odpowiedzialnie.</p>
 </div>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 🧠 KONFIGURACJA GIER
+# 4. KONFIGURACJA GIER
 # ==============================================================================
 
 GAME_CONFIG = {
     "Keno": {
         "url": "https://www.wynikilotto.net.pl/keno/wyniki/",
-        "range": 70, "pick": 10, "sum_min": 200, "sum_max": 500, "has_bonus": False
+        "range": 70, "pick": 10, "draw_size": 20, "sum_min": 200, "sum_max": 500, "has_bonus": False
     },
     "Szybkie 600": {
         "url": "https://www.wynikilotto.net.pl/szybkie-600/wyniki/",
-        "range": 32, "pick": 6, "sum_min": 75, "sum_max": 125, "has_bonus": False
+        "range": 32, "pick": 6, "draw_size": 6, "sum_min": 75, "sum_max": 125, "has_bonus": False
     },
     "Lotto": {
         "url": "https://www.wynikilotto.net.pl/lotto/wyniki/",
-        "range": 49, "pick": 6, "sum_min": 100, "sum_max": 200, "has_bonus": False
+        "range": 49, "pick": 6, "draw_size": 6, "sum_min": 100, "sum_max": 200, "has_bonus": False
     },
     "Lotto Plus": {
         "url": "https://www.wynikilotto.net.pl/lotto-plus/wyniki/",
-        "range": 49, "pick": 6, "sum_min": 100, "sum_max": 200, "has_bonus": False
+        "range": 49, "pick": 6, "draw_size": 6, "sum_min": 100, "sum_max": 200, "has_bonus": False
     },
     "Mini Lotto": {
         "url": "https://www.wynikilotto.net.pl/mini-lotto/wyniki/",
-        "range": 42, "pick": 5, "sum_min": 85, "sum_max": 135, "has_bonus": False
+        "range": 42, "pick": 5, "draw_size": 5, "sum_min": 85, "sum_max": 135, "has_bonus": False
     },
     "EuroJackpot": {
         "url": "https://www.wynikilotto.net.pl/eurojackpot/wyniki/",
-        "range": 50, "pick": 5, "sum_min": 95, "sum_max": 160, 
+        "range": 50, "pick": 5, "draw_size": 5, "sum_min": 95, "sum_max": 160, 
         "has_bonus": True, "bonus_range": 12, "bonus_pick": 2
     },
     "Multi Multi": {
         "url": "https://www.wynikilotto.net.pl/multi-multi/wyniki/",
-        "range": 80, "pick": 10, "sum_min": 250, "sum_max": 550, "has_bonus": False
+        "range": 80, "pick": 10, "draw_size": 20, "sum_min": 250, "sum_max": 550, "has_bonus": False
     },
     "Ekstra Pensja": {
         "url": "https://www.wynikilotto.net.pl/ekstra-pensja/wyniki/",
-        "range": 35, "pick": 5, "sum_min": 60, "sum_max": 120, 
+        "range": 35, "pick": 5, "draw_size": 5, "sum_min": 60, "sum_max": 120, 
         "has_bonus": True, "bonus_range": 4, "bonus_pick": 1
     }
 }
 
 # ==============================================================================
-# 🔌 SCRAPER (KOLUMNOWY / CELL-BASED)
+# 5. SCRAPER (CLOUDSCRAPER - ROZWIĄZANIE 415)
 # ==============================================================================
 
 @st.cache_data(ttl=60)
 def fetch_from_scraper(game_name):
     """
-    Pobiera wyniki iterując po KOLUMNACH (td), aby oddzielić daty od wyników.
-    Działa niezależnie od formatowania tekstu w wierszu.
+    Pobiera wyniki używając biblioteki cloudscraper, która udaje prawdziwą przeglądarkę
+    i omija błędy 403/415 Forbidden/Unsupported Media Type.
     """
     config = GAME_CONFIG[game_name]
     url = config["url"]
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36"
-    }
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        # Tworzymy instancję scrapera
+        scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            }
+        )
+        
+        # Pobieramy stronę
+        response = scraper.get(url)
         response.raise_for_status() 
         
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -210,54 +216,50 @@ def fetch_from_scraper(game_name):
         for row in rows:
             cells = row.find_all('td')
             if not cells:
-                continue # Pomiń nagłówki
+                continue 
             
-            # --- 1. Znajdź Datę (Zazwyczaj 1. lub 2. kolumna) ---
+            # 1. Znajdź Datę
             row_text = row.get_text(separator=' ')
             date_match = re.search(r'\d{2}\.\d{2}\.\d{4}', row_text)
             
             if date_match:
                 date_str = date_match.group(0)
             else:
-                # Fallback dla gier co 4 minuty (szukamy godziny)
                 time_match = re.search(r'\d{2}:\d{2}', row_text)
                 if time_match:
                     date_str = f"Dziś {time_match.group(0)}"
                 else:
-                    continue # Nie ma daty ani godziny -> śmieciowy wiersz
+                    continue 
             
-            # --- 2. Znajdź Kolumnę z Wynikami ---
-            # Skanujemy każdą komórkę, aby znaleźć tę z największą liczbą poprawnych kul.
-            
+            # 2. Znajdź Kolumnę z Wynikami (Cell-Based)
             best_candidate_nums = []
             max_valid_count = 0
             
             for cell in cells:
                 cell_text = cell.get_text(separator=' ')
-                # Wyciągnij liczby z tej konkretnej komórki
                 nums_in_cell = [int(n) for n in re.findall(r'\b\d+\b', cell_text)]
-                # Przefiltruj liczby (zakres gry)
                 valid_in_cell = [n for n in nums_in_cell if 1 <= n <= config["range"]]
                 
-                # Jeśli ta komórka ma więcej poprawnych liczb niż poprzednie, to jest nasz kandydat
                 if len(valid_in_cell) > max_valid_count:
                     max_valid_count = len(valid_in_cell)
                     best_candidate_nums = valid_in_cell
             
-            # --- 3. Weryfikacja ---
-            min_req = config["pick"] # Ile liczb potrzebujemy minimum
+            # 3. Weryfikacja
+            target_size = config["draw_size"]
+            min_valid = target_size - 2 if target_size > 10 else target_size
             
-            if max_valid_count >= min_req:
-                # Logika dla Keno (20 liczb w wyniku -> bierzemy 20 unikalnych)
-                if game_name == "Keno":
-                    final_result = list(dict.fromkeys(best_candidate_nums[-20:]))
-                else:
-                    # Logika dla innych (Lotto 6, Euro 5+2) - bierzemy ostatnie X liczb z komórki
-                    total_needed = config["pick"] + (config["bonus_pick"] if config["has_bonus"] else 0)
-                    final_result = best_candidate_nums[-total_needed:]
+            if max_valid_count >= min_valid:
+                total_to_take = target_size
+                if config["has_bonus"]:
+                    total_to_take += config["bonus_pick"]
                 
-                # Zabezpieczenie przed pustymi/niepełnymi
-                if len(final_result) >= config["pick"]:
+                # Unikalność dla Multi/Keno
+                if target_size == 20:
+                     final_result = list(dict.fromkeys(best_candidate_nums[-20:]))
+                else:
+                     final_result = best_candidate_nums[-total_to_take:]
+                
+                if len(final_result) >= target_size:
                     draws.append({
                         "date": date_str,
                         "numbers": final_result
@@ -266,20 +268,21 @@ def fetch_from_scraper(game_name):
         return draws, None
 
     except Exception as e:
-        return [], f"Błąd scrapowania: {str(e)}"
+        # Fallback message
+        return [], f"Błąd scrapowania (CloudScraper): {str(e)}"
 
 # ==============================================================================
-# 🎰 ALGORYTM SMART (LIMIT 100 + DELTA)
+# 6. ALGORYTM SMART (LIMIT 100 + DELTA + HOT)
 # ==============================================================================
 
 def advanced_smart_generator(draws, game_name):
     config = GAME_CONFIG[game_name]
     population = list(range(1, config["range"] + 1))
     
-    # --- LIMIT 100 LOSOWAŃ ---
+    # LIMIT 100
     analysis_data = draws[:100] if draws else []
     
-    # 1. HOT NUMBERS (WAGI)
+    # 1. WAGI
     weights = [1.0] * len(population)
     if analysis_data:
         all_nums = [n for d in analysis_data for n in d['numbers']]
@@ -288,45 +291,40 @@ def advanced_smart_generator(draws, game_name):
 
     best_set = []
     
-    # 2. PRAWO POWTÓRZEŃ (Ostatnie losowanie)
+    # 2. POWTÓRKI
     last_draw_nums = analysis_data[0]['numbers'] if analysis_data else []
     
-    # 3. SYMULACJA MONTE CARLO
+    # 3. MONTE CARLO
     for _ in range(5000):
         candidates = set()
         
-        # A) REPETITION (Powtórki dla gier szybkich)
+        # A) Repetition
         if game_name in ["Keno", "Multi Multi", "Szybkie 600"] and last_draw_nums:
             if random.random() < 0.6: 
                 repeats = random.sample(last_draw_nums, k=random.randint(1, 2))
                 valid_repeats = [r for r in repeats if r in population]
                 candidates.update(valid_repeats[:2]) 
 
-        # B) RESZTA WAŻONA
+        # B) Reszta
         while len(candidates) < config["pick"]:
             c = random.choices(population, weights=weights, k=1)[0]
             candidates.add(c)
         
         nums = sorted(list(candidates))
         
-        # --- FILTRY ---
-        
-        # 1. DELTA (Odstępy)
+        # Filtry
         if config["pick"] <= 10:
             deltas = [nums[i+1] - nums[i] for i in range(len(nums)-1)]
-            if all(d <= 2 for d in deltas): continue # Za ciasno
-            if all(d > 15 for d in deltas): continue # Za luźno
+            if all(d <= 2 for d in deltas): continue 
+            if all(d > 15 for d in deltas): continue 
         
-        # 2. SUMA
-        if game_name != "Keno":
+        if game_name not in ["Keno", "Multi Multi"]:
             s_sum = sum(nums)
             if not (config["sum_min"] <= s_sum <= config["sum_max"]): continue
             
-        # 3. PARZYSTOŚĆ
         even = sum(1 for n in nums if n % 2 == 0)
         if even == 0 or even == config["pick"]: continue 
             
-        # 4. CIĄGI (Consecutive)
         cons_groups = 0
         current_seq = 0
         max_seq = 0
@@ -355,7 +353,7 @@ def advanced_smart_generator(draws, game_name):
     return best_set, special_set, len(analysis_data)
 
 # ==============================================================================
-# 🖥️ INTERFEJS
+# 7. INTERFEJS
 # ==============================================================================
 
 tab_gen, tab_res = st.tabs(["🎰 GENERATOR PRO", "📜 WYNIKI LIVE"])
@@ -371,7 +369,7 @@ with tab_gen:
         st.markdown(f"""
         <div class="slot-machine">
             <h2 style="margin:0;">{selected_game.upper()}</h2>
-            <p style="color:#aaa;">Trend 100 & Delta Logic</p>
+            <p style="color:#aaa;">Hot Numbers & Delta Logic</p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -379,7 +377,7 @@ with tab_gen:
         
         if st.button("🤠 OBLICZ NAJLEPSZY UKŁAD", use_container_width=True):
             
-            with st.spinner("Pobieranie i analiza kolumnowa..."):
+            with st.spinner("Przełamywanie zabezpieczeń i pobieranie danych..."):
                 draws, error = fetch_from_scraper(selected_game)
             
             if error:
@@ -392,7 +390,6 @@ with tab_gen:
                 
                 html = ""
                 for n in main_nums:
-                    # Bezpieczny HTML w f-stringu (potrójny cudzysłów)
                     html += f"""<div class='ball'>{n}</div>"""
                 st.markdown(html, unsafe_allow_html=True)
                 
@@ -417,7 +414,7 @@ with tab_gen:
 # --- ZAKŁADKA 2 ---
 with tab_res:
     st.markdown("### 📜 WYNIKI Z SIECI")
-    st.caption("Zweryfikowane wyniki (Algorytm Separacji Kolumn).")
+    st.caption("Wyświetlanie ostatnich 10 losowań.")
     
     res_game = st.selectbox("Pokaż wyniki dla:", list(GAME_CONFIG.keys()), key="res")
     
@@ -432,13 +429,15 @@ with tab_res:
             else:
                 for d in draws[:10]:
                     nums_str = ", ".join([str(n) for n in d['numbers']])
+                    count = len(d['numbers'])
+                    
                     st.markdown(f"""
                     <div class="result-row">
-                        <div style="color: #e6b800; font-size: 0.8em;">🕒 {d['date']}</div>
+                        <div style="color: #e6b800; font-size: 0.8em;">🕒 {d['date']} (Liczb: {count})</div>
                         <div style="font-size: 1.1em; font-weight: bold;">{nums_str}</div>
                     </div>
                     """, unsafe_allow_html=True)
 
 st.markdown("---")
-st.markdown("<div style='text-align: center; color: #888; font-size: 12px;'>Saloon Lotto 777 © 2026 | Gene Fix Edition</div>", unsafe_allow_html=True)
-                                                     
+st.markdown("<div style='text-align: center; color: #888; font-size: 12px;'>Saloon Lotto 777 © 2024 | CloudScraper Fix</div>", unsafe_allow_html=True)
+                
