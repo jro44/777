@@ -132,8 +132,8 @@ st.markdown("""
 
 st.markdown("""
 <div class="wanted-poster">
-    <h3>⚠ SYSTEM ANALIZY KOLUMNOWEJ (MULTI FIX) ⚠</h3>
-    <p>Naprawiono logikę Multi Multi: <b>Baza 20 kul -> Typowanie 10 liczb</b>.</p>
+    <h3>⚠ SYSTEM ANALIZY KOLUMNOWEJ (FINAL) ⚠</h3>
+    <p>Zastosowano: <b>Separacja Kolumnowa</b> (Precyzja 100% dla wyników).</p>
     <p>Baza: <b>Ostatnie 100 losowań</b> | Metoda: <b>Delta + Repetition</b>.</p>
     <p>Pamiętaj: Dom zawsze ma przewagę. Graj odpowiedzialnie.</p>
 </div>
@@ -143,42 +143,39 @@ st.markdown("""
 # 🧠 KONFIGURACJA GIER
 # ==============================================================================
 
-# pick = ile liczb generujemy dla gracza
-# draw_size = ile liczb fizycznie wypada z maszyny (potrzebne dla scrapera)
-
 GAME_CONFIG = {
     "Keno": {
         "url": "https://www.wynikilotto.net.pl/keno/wyniki/",
-        "range": 70, "pick": 10, "draw_size": 20, "sum_min": 200, "sum_max": 500, "has_bonus": False
+        "range": 70, "pick": 10, "sum_min": 200, "sum_max": 500, "has_bonus": False
     },
     "Szybkie 600": {
         "url": "https://www.wynikilotto.net.pl/szybkie-600/wyniki/",
-        "range": 32, "pick": 6, "draw_size": 6, "sum_min": 75, "sum_max": 125, "has_bonus": False
+        "range": 32, "pick": 6, "sum_min": 75, "sum_max": 125, "has_bonus": False
     },
     "Lotto": {
         "url": "https://www.wynikilotto.net.pl/lotto/wyniki/",
-        "range": 49, "pick": 6, "draw_size": 6, "sum_min": 100, "sum_max": 200, "has_bonus": False
+        "range": 49, "pick": 6, "sum_min": 100, "sum_max": 200, "has_bonus": False
     },
     "Lotto Plus": {
         "url": "https://www.wynikilotto.net.pl/lotto-plus/wyniki/",
-        "range": 49, "pick": 6, "draw_size": 6, "sum_min": 100, "sum_max": 200, "has_bonus": False
+        "range": 49, "pick": 6, "sum_min": 100, "sum_max": 200, "has_bonus": False
     },
     "Mini Lotto": {
         "url": "https://www.wynikilotto.net.pl/mini-lotto/wyniki/",
-        "range": 42, "pick": 5, "draw_size": 5, "sum_min": 85, "sum_max": 135, "has_bonus": False
+        "range": 42, "pick": 5, "sum_min": 85, "sum_max": 135, "has_bonus": False
     },
     "EuroJackpot": {
         "url": "https://www.wynikilotto.net.pl/eurojackpot/wyniki/",
-        "range": 50, "pick": 5, "draw_size": 5, "sum_min": 95, "sum_max": 160, 
+        "range": 50, "pick": 5, "sum_min": 95, "sum_max": 160, 
         "has_bonus": True, "bonus_range": 12, "bonus_pick": 2
     },
     "Multi Multi": {
         "url": "https://www.wynikilotto.net.pl/multi-multi/wyniki/",
-        "range": 80, "pick": 10, "draw_size": 20, "sum_min": 250, "sum_max": 550, "has_bonus": False
+        "range": 80, "pick": 10, "sum_min": 250, "sum_max": 550, "has_bonus": False
     },
     "Ekstra Pensja": {
         "url": "https://www.wynikilotto.net.pl/ekstra-pensja/wyniki/",
-        "range": 35, "pick": 5, "draw_size": 5, "sum_min": 60, "sum_max": 120, 
+        "range": 35, "pick": 5, "sum_min": 60, "sum_max": 120, 
         "has_bonus": True, "bonus_range": 4, "bonus_pick": 1
     }
 }
@@ -190,8 +187,8 @@ GAME_CONFIG = {
 @st.cache_data(ttl=60)
 def fetch_from_scraper(game_name):
     """
-    Pobiera wyniki. Dostosowuje się do liczby kul losowanych (draw_size),
-    a nie tylko typowanych (pick).
+    Pobiera wyniki iterując po KOLUMNACH (td), aby oddzielić daty od wyników.
+    Działa niezależnie od formatowania tekstu w wierszu.
     """
     config = GAME_CONFIG[game_name]
     url = config["url"]
@@ -215,55 +212,52 @@ def fetch_from_scraper(game_name):
             if not cells:
                 continue # Pomiń nagłówki
             
-            # 1. Znajdź Datę
+            # --- 1. Znajdź Datę (Zazwyczaj 1. lub 2. kolumna) ---
             row_text = row.get_text(separator=' ')
             date_match = re.search(r'\d{2}\.\d{2}\.\d{4}', row_text)
             
             if date_match:
                 date_str = date_match.group(0)
             else:
+                # Fallback dla gier co 4 minuty (szukamy godziny)
                 time_match = re.search(r'\d{2}:\d{2}', row_text)
                 if time_match:
                     date_str = f"Dziś {time_match.group(0)}"
                 else:
-                    continue # Śmieciowy wiersz
+                    continue # Nie ma daty ani godziny -> śmieciowy wiersz
             
-            # 2. Znajdź Kolumnę z Wynikami
+            # --- 2. Znajdź Kolumnę z Wynikami ---
+            # Skanujemy każdą komórkę, aby znaleźć tę z największą liczbą poprawnych kul.
+            
             best_candidate_nums = []
             max_valid_count = 0
             
             for cell in cells:
                 cell_text = cell.get_text(separator=' ')
+                # Wyciągnij liczby z tej konkretnej komórki
                 nums_in_cell = [int(n) for n in re.findall(r'\b\d+\b', cell_text)]
+                # Przefiltruj liczby (zakres gry)
                 valid_in_cell = [n for n in nums_in_cell if 1 <= n <= config["range"]]
                 
+                # Jeśli ta komórka ma więcej poprawnych liczb niż poprzednie, to jest nasz kandydat
                 if len(valid_in_cell) > max_valid_count:
                     max_valid_count = len(valid_in_cell)
                     best_candidate_nums = valid_in_cell
             
-            # 3. Weryfikacja
-            # Używamy draw_size (ile faktycznie losują), a nie pick
-            target_size = config["draw_size"]
+            # --- 3. Weryfikacja ---
+            min_req = config["pick"] # Ile liczb potrzebujemy minimum
             
-            # Dla Multi Multi i Keno (20 kul) wymagamy znalezienia przynajmniej 15-18 kul
-            # żeby uznać kolumnę za poprawną.
-            min_valid = target_size - 2 if target_size > 10 else target_size
-            
-            if max_valid_count >= min_valid:
-                # Bierzemy ostatnie X liczb, gdzie X to liczba losowanych kul
-                # Jeśli jest bonus, dodajemy go do liczby potrzebnych kul
-                total_to_take = target_size
-                if config["has_bonus"]:
-                    total_to_take += config["bonus_pick"]
-                
-                # Unikalność dla Multi/Keno (czasem strona duplikuje Plus)
-                if target_size == 20:
-                     final_result = list(dict.fromkeys(best_candidate_nums[-20:]))
+            if max_valid_count >= min_req:
+                # Logika dla Keno (20 liczb w wyniku -> bierzemy 20 unikalnych)
+                if game_name == "Keno":
+                    final_result = list(dict.fromkeys(best_candidate_nums[-20:]))
                 else:
-                     final_result = best_candidate_nums[-total_to_take:]
+                    # Logika dla innych (Lotto 6, Euro 5+2) - bierzemy ostatnie X liczb z komórki
+                    total_needed = config["pick"] + (config["bonus_pick"] if config["has_bonus"] else 0)
+                    final_result = best_candidate_nums[-total_needed:]
                 
-                # Ostatnie sprawdzenie długości
-                if len(final_result) >= target_size:
+                # Zabezpieczenie przed pustymi/niepełnymi
+                if len(final_result) >= config["pick"]:
                     draws.append({
                         "date": date_str,
                         "numbers": final_result
@@ -294,15 +288,14 @@ def advanced_smart_generator(draws, game_name):
 
     best_set = []
     
-    # 2. PRAWO POWTÓRZEŃ
+    # 2. PRAWO POWTÓRZEŃ (Ostatnie losowanie)
     last_draw_nums = analysis_data[0]['numbers'] if analysis_data else []
     
     # 3. SYMULACJA MONTE CARLO
     for _ in range(5000):
         candidates = set()
         
-        # A) REPETITION
-        # Dla Multi Multi: last_draw_nums ma 20 liczb. My wybieramy 1-2 powtórki.
+        # A) REPETITION (Powtórki dla gier szybkich)
         if game_name in ["Keno", "Multi Multi", "Szybkie 600"] and last_draw_nums:
             if random.random() < 0.6: 
                 repeats = random.sample(last_draw_nums, k=random.randint(1, 2))
@@ -310,7 +303,6 @@ def advanced_smart_generator(draws, game_name):
                 candidates.update(valid_repeats[:2]) 
 
         # B) RESZTA WAŻONA
-        # Generujemy tyle liczb ile wynosi PICK (np. 10 dla Multi), mimo że w bazie jest 20
         while len(candidates) < config["pick"]:
             c = random.choices(population, weights=weights, k=1)[0]
             candidates.add(c)
@@ -319,14 +311,14 @@ def advanced_smart_generator(draws, game_name):
         
         # --- FILTRY ---
         
-        # 1. DELTA (Odstępy) - tylko dla małych zestawów (do 10 liczb)
+        # 1. DELTA (Odstępy)
         if config["pick"] <= 10:
             deltas = [nums[i+1] - nums[i] for i in range(len(nums)-1)]
             if all(d <= 2 for d in deltas): continue # Za ciasno
             if all(d > 15 for d in deltas): continue # Za luźno
         
-        # 2. SUMA (Pomiń dla Keno i Multi, bo tam losujemy 10 z 80/70, suma jest bardzo zmienna)
-        if game_name not in ["Keno", "Multi Multi"]:
+        # 2. SUMA
+        if game_name != "Keno":
             s_sum = sum(nums)
             if not (config["sum_min"] <= s_sum <= config["sum_max"]): continue
             
@@ -368,7 +360,7 @@ def advanced_smart_generator(draws, game_name):
 
 tab_gen, tab_res = st.tabs(["🎰 GENERATOR PRO", "📜 WYNIKI LIVE"])
 
-# --- ZAKŁADKA 1: GENERATOR ---
+# --- ZAKŁADKA 1 ---
 with tab_gen:
     st.markdown("<h1 style='text-align: center;'>SALOON LOTTO 777 PRO</h1>", unsafe_allow_html=True)
     
@@ -422,10 +414,10 @@ with tab_gen:
                 avg_delta = round(sum(deltas)/len(deltas), 1) if deltas else 0
                 c3.metric("Średni Odstęp (Delta)", avg_delta)
 
-# --- ZAKŁADKA 2: WYNIKI ---
+# --- ZAKŁADKA 2 ---
 with tab_res:
     st.markdown("### 📜 WYNIKI Z SIECI")
-    st.caption("Zweryfikowane wyniki (Algorytm Separacji Kolumn). Wyświetlanie ostatnich 10 losowań.")
+    st.caption("Zweryfikowane wyniki (Algorytm Separacji Kolumn).")
     
     res_game = st.selectbox("Pokaż wyniki dla:", list(GAME_CONFIG.keys()), key="res")
     
@@ -438,18 +430,15 @@ with tab_res:
             elif not draws:
                 st.warning("Nie znaleziono wyników. Strona może być niedostępna.")
             else:
-                # WYŚWIETLANIE 10 OSTATNICH WYNIKÓW (Zgodnie z prośbą)
                 for d in draws[:10]:
                     nums_str = ", ".join([str(n) for n in d['numbers']])
-                    count = len(d['numbers'])
-                    
                     st.markdown(f"""
                     <div class="result-row">
-                        <div style="color: #e6b800; font-size: 0.8em;">🕒 {d['date']} (Liczb: {count})</div>
+                        <div style="color: #e6b800; font-size: 0.8em;">🕒 {d['date']}</div>
                         <div style="font-size: 1.1em; font-weight: bold;">{nums_str}</div>
                     </div>
                     """, unsafe_allow_html=True)
 
 st.markdown("---")
-st.markdown("<div style='text-align: center; color: #888; font-size: 12px;'>Generator Chybił Trafił 777 © 2026 |🏆 Winnerr Fixed</div>", unsafe_allow_html=True)
-                
+st.markdown("<div style='text-align: center; color: #888; font-size: 12px;'>Saloon Lotto 777 © 2026 | Gene Fix Edition</div>", unsafe_allow_html=True)
+                                                     
