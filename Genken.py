@@ -1,17 +1,16 @@
 import streamlit as st
-import cloudscraper  # <-- ZMIANA: Używamy cloudscraper zamiast requests
-from bs4 import BeautifulSoup
-import random
+import pdfplumber
 import re
+import random
 from collections import Counter
-from datetime import datetime
+import os
 
 # ==============================================================================
 # 1. KONFIGURACJA STRONY
 # ==============================================================================
 
 st.set_page_config(
-    page_title="Saloon Lotto 777",
+    page_title="Saloon Lotto 777 (Offline)",
     page_icon="🤠",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -23,7 +22,6 @@ st.set_page_config(
 
 st.markdown("""
     <style>
-    /* TŁO I CZCIONKI */
     .stApp {
         background-color: #2b2118;
         background-image: radial-gradient(#3d2e22 2px, transparent 2px);
@@ -31,8 +29,6 @@ st.markdown("""
         color: #f0e6d2;
         font-family: 'Courier New', Courier, monospace;
     }
-    
-    /* NAGŁÓWKI */
     h1, h2, h3 {
         color: #e6b800 !important;
         text-shadow: 2px 2px 0px #000;
@@ -40,8 +36,6 @@ st.markdown("""
         text-transform: uppercase;
         letter-spacing: 2px;
     }
-    
-    /* OSTRZEŻENIE */
     .wanted-poster {
         background-color: #fdf5e6;
         color: #3e2723;
@@ -54,8 +48,6 @@ st.markdown("""
         box-shadow: 5px 5px 15px rgba(0,0,0,0.5);
         background-image: url("https://www.transparenttextures.com/patterns/aged-paper.png");
     }
-
-    /* KULE */
     .ball {
         display: inline-flex;
         justify-content: center;
@@ -77,8 +69,6 @@ st.markdown("""
         color: white;
         border-color: #5c4033;
     }
-
-    /* MASZYNA */
     .slot-machine {
         background-color: #4a3525;
         border: 8px solid #8B4513;
@@ -88,8 +78,6 @@ st.markdown("""
         text-align: center;
         margin-top: 20px;
     }
-    
-    /* PRZYCISK */
     div.stButton > button {
         background: linear-gradient(to bottom, #d4af37 5%, #a67c00 100%);
         background-color: #d4af37;
@@ -109,8 +97,6 @@ st.markdown("""
         transform: translateY(4px);
         box-shadow: 0px 0px 0px #5c4033;
     }
-    
-    /* WYNIKI */
     .result-row {
         background-color: #3d2e22;
         padding: 10px;
@@ -118,8 +104,6 @@ st.markdown("""
         border-left: 5px solid #e6b800;
         border-radius: 4px;
     }
-    
-    /* METRYKI */
     div[data-testid="stMetricValue"] {
         color: #e6b800;
     }
@@ -132,199 +116,183 @@ st.markdown("""
 
 st.markdown("""
 <div class="wanted-poster">
-    <h3>⚠ SYSTEM CLOUDSCRAPER (415 BYPASS) ⚠</h3>
-    <p>Zastosowano: <b>Zaawansowane omijanie blokad (CloudScraper)</b>.</p>
-    <p>Baza: <b>Ostatnie 100 losowań</b> | Metoda: <b>Delta + Repetition</b>.</p>
+    <h3>⚠ SYSTEM PLIKÓW LOKALNYCH (PDF) ⚠</h3>
+    <p>Tryb manualny: Pobieranie z osobnych plików (np. <b>wynlotto.pdf</b>).</p>
+    <p>Algorytm: <b>Trend 100 + Delta + Repetition</b>.</p>
     <p>Pamiętaj: Dom (Kasyno) zawsze ma przewagę. Graj odpowiedzialnie.</p>
 </div>
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 4. KONFIGURACJA GIER
+# 4. KONFIGURACJA GIER I PLIKÓW
 # ==============================================================================
 
 GAME_CONFIG = {
-    "Keno": {
-        "url": "https://www.wynikilotto.net.pl/keno/wyniki/",
-        "range": 70, "pick": 10, "draw_size": 20, "sum_min": 200, "sum_max": 500, "has_bonus": False
-    },
-    "Szybkie 600": {
-        "url": "https://www.wynikilotto.net.pl/szybkie-600/wyniki/",
-        "range": 32, "pick": 6, "draw_size": 6, "sum_min": 75, "sum_max": 125, "has_bonus": False
-    },
     "Lotto": {
-        "url": "https://www.wynikilotto.net.pl/lotto/wyniki/",
-        "range": 49, "pick": 6, "draw_size": 6, "sum_min": 100, "sum_max": 200, "has_bonus": False
+        "filename": "wynlotto.pdf",
+        "range": 49, "pick": 6, "sum_min": 100, "sum_max": 200, "has_bonus": False
     },
     "Lotto Plus": {
-        "url": "https://www.wynikilotto.net.pl/lotto-plus/wyniki/",
-        "range": 49, "pick": 6, "draw_size": 6, "sum_min": 100, "sum_max": 200, "has_bonus": False
-    },
-    "Mini Lotto": {
-        "url": "https://www.wynikilotto.net.pl/mini-lotto/wyniki/",
-        "range": 42, "pick": 5, "draw_size": 5, "sum_min": 85, "sum_max": 135, "has_bonus": False
-    },
-    "EuroJackpot": {
-        "url": "https://www.wynikilotto.net.pl/eurojackpot/wyniki/",
-        "range": 50, "pick": 5, "draw_size": 5, "sum_min": 95, "sum_max": 160, 
-        "has_bonus": True, "bonus_range": 12, "bonus_pick": 2
+        "filename": "wynlotto+.pdf",
+        "range": 49, "pick": 6, "sum_min": 100, "sum_max": 200, "has_bonus": False
     },
     "Multi Multi": {
-        "url": "https://www.wynikilotto.net.pl/multi-multi/wyniki/",
-        "range": 80, "pick": 10, "draw_size": 20, "sum_min": 250, "sum_max": 550, "has_bonus": False
+        "filename": "wynmulti.pdf",
+        "range": 80, "pick": 10, "sum_min": 250, "sum_max": 550, "has_bonus": False
+    },
+    "EuroJackpot": {
+        "filename": "wynjack.pdf",
+        "range": 50, "pick": 5, "sum_min": 95, "sum_max": 160, 
+        "has_bonus": True, "bonus_range": 12, "bonus_pick": 2
+    },
+    "Szybkie 600": {
+        "filename": "wyn600.pdf",
+        "range": 32, "pick": 6, "sum_min": 75, "sum_max": 125, "has_bonus": False
+    },
+    "Keno": {
+        "filename": "wynkeno.pdf",
+        "range": 70, "pick": 10, "sum_min": 200, "sum_max": 500, "has_bonus": False
+    },
+    "Mini Lotto": {
+        "filename": "wynmini.pdf",
+        "range": 42, "pick": 5, "sum_min": 85, "sum_max": 135, "has_bonus": False
     },
     "Ekstra Pensja": {
-        "url": "https://www.wynikilotto.net.pl/ekstra-pensja/wyniki/",
-        "range": 35, "pick": 5, "draw_size": 5, "sum_min": 60, "sum_max": 120, 
+        "filename": "wynpensja.pdf",
+        "range": 35, "pick": 5, "sum_min": 60, "sum_max": 120, 
         "has_bonus": True, "bonus_range": 4, "bonus_pick": 1
     }
 }
 
 # ==============================================================================
-# 5. SCRAPER (CLOUDSCRAPER - ROZWIĄZANIE 415)
+# 5. READER PDF (OBSŁUGA OSOBNYCH PLIKÓW)
 # ==============================================================================
 
-@st.cache_data(ttl=60)
-def fetch_from_scraper(game_name):
+def load_data_from_specific_pdf(selected_game):
     """
-    Pobiera wyniki używając biblioteki cloudscraper, która udaje prawdziwą przeglądarkę
-    i omija błędy 403/415 Forbidden/Unsupported Media Type.
+    Pobiera nazwę pliku z konfiguracji i czyta go w całości.
     """
-    config = GAME_CONFIG[game_name]
-    url = config["url"]
-
+    config = GAME_CONFIG[selected_game]
+    filename = config["filename"]
+    
+    if not os.path.exists(filename):
+        return [], f"BRAK PLIKU: {filename}. Wgraj go na GitHub."
+    
+    draws = []
+    
     try:
-        # Tworzymy instancję scrapera
-        scraper = cloudscraper.create_scraper(
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'desktop': True
-            }
-        )
-        
-        # Pobieramy stronę
-        response = scraper.get(url)
-        response.raise_for_status() 
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        draws = []
-        
-        # Znajdź wszystkie wiersze tabeli
-        rows = soup.find_all('tr')
-        
-        for row in rows:
-            cells = row.find_all('td')
-            if not cells:
-                continue 
-            
-            # 1. Znajdź Datę
-            row_text = row.get_text(separator=' ')
-            date_match = re.search(r'\d{2}\.\d{2}\.\d{4}', row_text)
-            
-            if date_match:
-                date_str = date_match.group(0)
-            else:
-                time_match = re.search(r'\d{2}:\d{2}', row_text)
-                if time_match:
-                    date_str = f"Dziś {time_match.group(0)}"
-                else:
-                    continue 
-            
-            # 2. Znajdź Kolumnę z Wynikami (Cell-Based)
-            best_candidate_nums = []
-            max_valid_count = 0
-            
-            for cell in cells:
-                cell_text = cell.get_text(separator=' ')
-                nums_in_cell = [int(n) for n in re.findall(r'\b\d+\b', cell_text)]
-                valid_in_cell = [n for n in nums_in_cell if 1 <= n <= config["range"]]
+        with pdfplumber.open(filename) as pdf:
+            full_text = ""
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    full_text += text + "\n"
                 
-                if len(valid_in_cell) > max_valid_count:
-                    max_valid_count = len(valid_in_cell)
-                    best_candidate_nums = valid_in_cell
+        # Podział na linie
+        lines = full_text.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line: continue
             
-            # 3. Weryfikacja
-            target_size = config["draw_size"]
-            min_valid = target_size - 2 if target_size > 10 else target_size
+            # Prosty parser: szukamy daty i liczb w linii
             
-            if max_valid_count >= min_valid:
-                total_to_take = target_size
-                if config["has_bonus"]:
-                    total_to_take += config["bonus_pick"]
-                
-                # Unikalność dla Multi/Keno
-                if target_size == 20:
-                     final_result = list(dict.fromkeys(best_candidate_nums[-20:]))
-                else:
-                     final_result = best_candidate_nums[-total_to_take:]
-                
-                if len(final_result) >= target_size:
-                    draws.append({
-                        "date": date_str,
-                        "numbers": final_result
-                    })
-
+            # 1. Wyciągamy datę (opcjonalnie, do wyświetlania)
+            date_match = re.search(r'\d{2}\.\d{2}\.\d{4}', line)
+            date_str = date_match.group(0) if date_match else "Wynik"
+            
+            # 2. Czyścimy linię z daty, żeby nie pomylić roku z kulą
+            clean_line = re.sub(r'\d{2}\.\d{2}\.\d{4}', '', line)
+            
+            # 3. Znajdź wszystkie liczby
+            numbers = [int(n) for n in re.findall(r'\b\d+\b', clean_line)]
+            
+            # 4. Filtrujemy liczby z zakresu gry (np. 1-49 dla Lotto)
+            valid_nums = [n for n in numbers if 1 <= n <= config["range"]]
+            
+            # 5. Sprawdzamy czy linia ma sensowne dane (minimum liczb)
+            min_req = config["pick"]
+            # Dla Multi/Keno w PDF powinno być 20 liczb, mimo że gramy na 10
+            if selected_game in ["Multi Multi", "Keno"]:
+                min_req = 15 
+            
+            if len(valid_nums) >= min_req:
+                draws.append({
+                    "date": date_str,
+                    "numbers": valid_nums
+                })
+                    
+        if not draws:
+            return [], f"Plik {filename} jest pusty lub nie zawiera poprawnych liczb."
+            
         return draws, None
 
     except Exception as e:
-        # Fallback message
-        return [], f"Błąd scrapowania (CloudScraper): {str(e)}"
+        return [], f"Błąd odczytu pliku {filename}: {str(e)}"
 
 # ==============================================================================
-# 6. ALGORYTM SMART (LIMIT 100 + DELTA + HOT)
+# 6. ALGORYTM SMART (TREND 100 + DELTA + REPETITION)
 # ==============================================================================
 
-def advanced_smart_generator(draws, game_name):
+def smart_generator_pdf(draws, game_name):
     config = GAME_CONFIG[game_name]
     population = list(range(1, config["range"] + 1))
     
-    # LIMIT 100
+    # --- LIMIT 100 NAJNOWSZYCH ---
+    # Zakładamy, że w PDF najnowsze są na górze (index 0) lub na dole.
+    # Zazwyczaj przy czytaniu PDF kolejność jest zachowana z góry na dół.
+    # Bierzemy pierwsze 100 wierszy (zakładając że wpisujesz od najnowszego na górze)
+    # Jeśli wpisujesz odwrotnie, algorytm i tak wyłapie częstotliwość.
     analysis_data = draws[:100] if draws else []
     
-    # 1. WAGI
+    # 1. WAGI (HOT NUMBERS)
     weights = [1.0] * len(population)
     if analysis_data:
         all_nums = [n for d in analysis_data for n in d['numbers']]
         counts = Counter(all_nums)
+        # Potęgowanie wzmacnia liczby częste
         weights = [(counts.get(i, 0) + 1)**1.6 for i in population]
 
     best_set = []
     
-    # 2. POWTÓRKI
+    # 2. POWTÓRKI (Z ostatniego dostępnego losowania)
     last_draw_nums = analysis_data[0]['numbers'] if analysis_data else []
     
-    # 3. MONTE CARLO
+    # 3. SYMULACJA MONTE CARLO
     for _ in range(5000):
         candidates = set()
         
-        # A) Repetition
+        # A) MECHANIZM POWTÓRZEŃ
         if game_name in ["Keno", "Multi Multi", "Szybkie 600"] and last_draw_nums:
             if random.random() < 0.6: 
                 repeats = random.sample(last_draw_nums, k=random.randint(1, 2))
                 valid_repeats = [r for r in repeats if r in population]
                 candidates.update(valid_repeats[:2]) 
 
-        # B) Reszta
+        # B) RESZTA WAŻONA
         while len(candidates) < config["pick"]:
             c = random.choices(population, weights=weights, k=1)[0]
             candidates.add(c)
         
         nums = sorted(list(candidates))
         
-        # Filtry
+        # FILTRY
+        # Delta (odstępy) - tylko dla małych zestawów
         if config["pick"] <= 10:
             deltas = [nums[i+1] - nums[i] for i in range(len(nums)-1)]
             if all(d <= 2 for d in deltas): continue 
             if all(d > 15 for d in deltas): continue 
         
+        # Suma (nie dla Keno/Multi)
         if game_name not in ["Keno", "Multi Multi"]:
             s_sum = sum(nums)
             if not (config["sum_min"] <= s_sum <= config["sum_max"]): continue
             
+        # Parzystość
         even = sum(1 for n in nums if n % 2 == 0)
         if even == 0 or even == config["pick"]: continue 
             
+        # Ciągi
         cons_groups = 0
         current_seq = 0
         max_seq = 0
@@ -353,38 +321,42 @@ def advanced_smart_generator(draws, game_name):
     return best_set, special_set, len(analysis_data)
 
 # ==============================================================================
-# 7. INTERFEJS
+# 7. INTERFEJS UŻYTKOWNIKA
 # ==============================================================================
 
-tab_gen, tab_res = st.tabs(["🎰 GENERATOR PRO", "📜 WYNIKI LIVE"])
+tab_gen, tab_res = st.tabs(["🎰 GENERATOR", "📂 PODGLĄD PLIKU"])
 
-# --- ZAKŁADKA 1 ---
+# --- ZAKŁADKA 1: GENERATOR ---
 with tab_gen:
-    st.markdown("<h1 style='text-align: center;'>SALOON LOTTO 777 PRO</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center;'>SALOON LOTTO 777</h1>", unsafe_allow_html=True)
     
     selected_game = st.selectbox("Wybierz grę:", list(GAME_CONFIG.keys()))
+    
+    # Pobieramy nazwę pliku do wyświetlenia
+    current_file = GAME_CONFIG[selected_game]['filename']
     
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
         st.markdown(f"""
         <div class="slot-machine">
             <h2 style="margin:0;">{selected_game.upper()}</h2>
-            <p style="color:#aaa;">Hot Numbers & Delta Logic</p>
+            <p style="color:#aaa;">Źródło: {current_file}</p>
         </div>
         """, unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
         
-        if st.button("🤠 OBLICZ NAJLEPSZY UKŁAD", use_container_width=True):
+        if st.button("🤠 OBLICZ UKŁAD (PDF)", use_container_width=True):
             
-            with st.spinner("Przełamywanie zabezpieczeń i pobieranie danych..."):
-                draws, error = fetch_from_scraper(selected_game)
+            with st.spinner(f"Czytanie pliku {current_file}..."):
+                draws, error = load_data_from_specific_pdf(selected_game)
             
             if error:
-                st.error(f"Błąd sieci: {error}")
+                st.error(error)
+                st.info(f"Upewnij się, że plik '{current_file}' jest wgrany na GitHub.")
             else:
-                with st.spinner("Analiza wariantów (Ostatnie 100 gier)..."):
-                    main_nums, spec_nums, analyzed_count = advanced_smart_generator(draws, selected_game)
+                with st.spinner(f"Analiza {len(draws)} losowań..."):
+                    main_nums, spec_nums, count = smart_generator_pdf(draws, selected_game)
                 
                 st.markdown("<div style='text-align: center; margin-top: 20px;'>", unsafe_allow_html=True)
                 
@@ -404,40 +376,35 @@ with tab_gen:
                 
                 st.markdown("---")
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Baza Analizy", f"Ostatnie {analyzed_count}")
-                c2.metric("Suma", sum(main_nums))
-                
-                deltas = [main_nums[i+1]-main_nums[i] for i in range(len(main_nums)-1)]
-                avg_delta = round(sum(deltas)/len(deltas), 1) if deltas else 0
-                c3.metric("Średni Odstęp (Delta)", avg_delta)
+                c1.metric("Baza Danych", current_file)
+                c2.metric("Trend (Ilość)", f"Ostatnie {count}")
+                c3.metric("Suma Liczb", sum(main_nums))
 
-# --- ZAKŁADKA 2 ---
+# --- ZAKŁADKA 2: PODGLĄD PLIKU ---
 with tab_res:
-    st.markdown("### 📜 WYNIKI Z SIECI")
-    st.caption("Wyświetlanie ostatnich 10 losowań.")
+    st.markdown("### 📂 ZAWARTOŚĆ PLIKÓW")
+    st.caption("Podgląd danych wczytanych z Twoich plików PDF.")
     
-    res_game = st.selectbox("Pokaż wyniki dla:", list(GAME_CONFIG.keys()), key="res")
+    view_game = st.selectbox("Pokaż zawartość pliku dla:", list(GAME_CONFIG.keys()), key="pdf_view")
+    target_file = GAME_CONFIG[view_game]['filename']
     
-    if st.button("🔄 Odśwież Tabelę"):
-        with st.spinner("Pobieranie..."):
-            draws, error = fetch_from_scraper(res_game)
-            
-            if error:
-                st.error(error)
-            elif not draws:
-                st.warning("Nie znaleziono wyników. Strona może być niedostępna.")
-            else:
-                for d in draws[:10]:
-                    nums_str = ", ".join([str(n) for n in d['numbers']])
-                    count = len(d['numbers'])
-                    
-                    st.markdown(f"""
-                    <div class="result-row">
-                        <div style="color: #e6b800; font-size: 0.8em;">🕒 {d['date']} (Liczb: {count})</div>
-                        <div style="font-size: 1.1em; font-weight: bold;">{nums_str}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+    if st.button(f"🔄 Wczytaj {target_file}"):
+        draws, error = load_data_from_specific_pdf(view_game)
+        
+        if error:
+            st.error(error)
+        else:
+            st.success(f"Znaleziono {len(draws)} wpisów w pliku {target_file}")
+            # Wyświetl 10 pierwszych z góry
+            for d in draws[:10]:
+                nums_str = ", ".join([str(n) for n in d['numbers']])
+                st.markdown(f"""
+                <div class="result-row">
+                    <div style="color: #e6b800; font-size: 0.8em;">📄 {d['date']}</div>
+                    <div style="font-size: 1.1em; font-weight: bold;">{nums_str}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
 st.markdown("---")
-st.markdown("<div style='text-align: center; color: #888; font-size: 12px;'>Saloon Lotto 777 © 2024 | CloudScraper Fix</div>", unsafe_allow_html=True)
-                
+st.markdown("<div style='text-align: center; color: #888; font-size: 12px;'>Generator Szczęśliwych Cyfr © 2026 | By A.K #</div>", unsafe_allow_html=True)
+        
