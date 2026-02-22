@@ -3,6 +3,7 @@ import re
 import zipfile
 import random
 from collections import Counter
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -10,26 +11,25 @@ from pypdf import PdfReader
 
 
 # =========================
-# 🎨 GOTYCKI $ STYL (CSS)
+# 🎨 GOTYCKI $ STYL (czytelniejszy + mocny czarny przycisk)
 # =========================
 GOTHIC_CSS = """
 <style>
 :root{
   --bg0:#07070b;
-  --bg1:#0d0d14;
-  --card:#10101a;
+  --bg1:#0b0b12;
+  --card:#111118;
   --card2:#151524;
-  --txt:#f2f2f2;
-  --mut:#b7b7c7;
+  --txt:#f4f4f6;
+  --mut:#c2c2d3;
   --gold:#d7c36a;
-  --green:#00ff88;
-  --red:#ff3b6a;
-  --border:rgba(215,195,106,.28);
-  --shadow: 0 12px 40px rgba(0,0,0,.55);
+  --green:#00ff99;
+  --border:rgba(215,195,106,.30);
+  --shadow: 0 12px 40px rgba(0,0,0,.60);
 }
 
 html, body, [class*="css"]  {
-  background: radial-gradient(1200px 600px at 15% 10%, rgba(0,255,136,0.10), transparent 60%),
+  background: radial-gradient(1200px 600px at 15% 10%, rgba(0,255,153,0.10), transparent 60%),
               radial-gradient(900px 500px at 90% 20%, rgba(215,195,106,0.10), transparent 55%),
               linear-gradient(180deg, var(--bg0), var(--bg1));
   color: var(--txt) !important;
@@ -47,21 +47,23 @@ h1, h2, h3 { letter-spacing: .5px; }
 h1{
   font-family: ui-serif, Georgia, "Times New Roman", serif;
   text-transform: uppercase;
+  margin-bottom: .35rem;
 }
 .badge{
   display:inline-block;
-  padding:.25rem .55rem;
+  padding:.25rem .60rem;
   border:1px solid var(--border);
   border-radius: 999px;
-  background: rgba(215,195,106,0.08);
+  background: rgba(215,195,106,0.10);
   color: var(--gold);
-  font-weight: 600;
+  font-weight: 700;
   margin-left: .5rem;
+  font-size: .85rem;
 }
 
 /* Karty */
 .card{
-  background: linear-gradient(180deg, rgba(16,16,26,0.92), rgba(13,13,20,0.92));
+  background: linear-gradient(180deg, rgba(17,17,24,0.96), rgba(11,11,18,0.96));
   border: 1px solid var(--border);
   box-shadow: var(--shadow);
   border-radius: 18px;
@@ -72,24 +74,27 @@ h1{
 /* “$” ornament */
 .orn{
   font-family: ui-serif, Georgia, "Times New Roman", serif;
-  color: rgba(215,195,106,.85);
+  color: rgba(215,195,106,.90);
   font-size: 1.05rem;
   margin: .25rem 0 .75rem 0;
 }
-.orn span{ color: rgba(0,255,136,.75); }
+.orn span{ color: rgba(0,255,153,.80); }
 
-/* Przyciski */
-.stButton > button{
-  border-radius: 14px;
-  border: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(215,195,106,0.14), rgba(0,0,0,0));
-  color: var(--txt);
-  padding: .6rem 1rem;
-  font-weight: 700;
+/* ✅ SUPER CZYTELNY PRZYCISK "GENERUJ" */
+div.stButton > button{
+  background-color: #000000 !important;
+  color: var(--green) !important;
+  font-size: 20px !important;
+  font-weight: 900 !important;
+  padding: 14px 18px !important;
+  border-radius: 14px !important;
+  border: 2px solid var(--green) !important;
+  width: 100% !important;
 }
-.stButton > button:hover{
-  border-color: rgba(0,255,136,.35);
-  background: linear-gradient(180deg, rgba(0,255,136,0.12), rgba(0,0,0,0));
+div.stButton > button:hover{
+  background-color: var(--green) !important;
+  color: #000000 !important;
+  border: 2px solid var(--green) !important;
 }
 
 /* Tabele */
@@ -99,7 +104,7 @@ h1{
   border: 1px solid var(--border) !important;
 }
 
-/* Etykiety */
+/* Teksty pomocnicze */
 small, .muted{ color: var(--mut); }
 hr{ border-color: rgba(215,195,106,.18); }
 </style>
@@ -107,16 +112,18 @@ hr{ border-color: rgba(215,195,106,.18); }
 
 
 # =========================
-# 🧠 LOGIKA: PARSE PDF
+# 🧠 LOGIKA: PARSE PDF (z pliku wyniki.pdf w repo)
 # =========================
-LINE_6NUM = re.compile(r"(?<!\d)([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)(?!\d)")
+LINE_6NUM = re.compile(
+    r"(?<!\d)([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)(?!\d)"
+)
 
-def extract_draws_from_pdf(pdf_bytes: bytes) -> list[list[int]]:
+def extract_draws_from_pdf_path(pdf_path: Path) -> list[list[int]]:
     """
     Wyciąga wszystkie losowania (linie z 6 liczbami 1–49) z PDF.
     Zwraca listę losowań: [[n1..n6], ...]
     """
-    reader = PdfReader(io.BytesIO(pdf_bytes))
+    reader = PdfReader(str(pdf_path))
     draws: list[list[int]] = []
 
     for page in reader.pages:
@@ -134,7 +141,7 @@ def extract_draws_from_pdf(pdf_bytes: bytes) -> list[list[int]]:
 
 def compute_stats(draws: list[list[int]]) -> pd.DataFrame:
     """
-    Zwraca tabelę 1..49 z częstotliwością.
+    Zwraca tabelę 1..49 z częstotliwością (posortowane malejąco).
     """
     flat = [n for draw in draws for n in draw]
     c = Counter(flat)
@@ -151,6 +158,7 @@ def build_groups(freq_df: pd.DataFrame, hot_size: int, cold_size: int):
     """
     Gorące: top hot_size
     Zimne: bottom cold_size
+    Neutralne: reszta
     """
     hot = freq_df.head(hot_size)["Liczba"].tolist()
     cold = freq_df.tail(cold_size)["Liczba"].tolist()
@@ -159,7 +167,7 @@ def build_groups(freq_df: pd.DataFrame, hot_size: int, cold_size: int):
 
 
 # =========================
-# 🎲 GENERATOR KUPONÓW
+# 🎲 GENERATOR KUPONÓW (oryginał)
 # =========================
 def pick_unique(pool: list[int], k: int) -> list[int]:
     if len(pool) < k:
@@ -196,12 +204,11 @@ def gen_tickets_hybrid(
     w_mix: float = 0.10,
 ) -> list[dict]:
     """
-    70% kuponów hot, 20% cold, 10% mix (domyślnie).
+    70% kuponów hot, 20% cold, 10% mix.
     Zwraca listę rekordów: {"Typ": "...", "Kupon": [..]}
     """
-    weights = [("hot", w_hot), ("cold", w_cold), ("mix", w_mix)]
-    labels = [x[0] for x in weights]
-    probs = [x[1] for x in weights]
+    labels = ["hot", "cold", "mix"]
+    probs = [w_hot, w_cold, w_mix]
 
     out = []
     for _ in range(n_tickets):
@@ -217,8 +224,6 @@ def gen_tickets_hybrid(
 def count_adjacent_runs(nums: list[int]) -> int:
     """
     Liczy ile jest par sąsiadujących (różnica 1) w posortowanym kuponie.
-    Przykład: [1,2,3,10,20,21]
-      pary sąsiadujące: (1,2), (2,3), (20,21) => 3
     """
     nums = sorted(nums)
     runs = 0
@@ -228,22 +233,21 @@ def count_adjacent_runs(nums: list[int]) -> int:
     return runs
 
 
-def count_pairs_by_mod(nums: list[int], mod: int) -> int:
+def count_pairs_by_decade(nums: list[int]) -> int:
     """
-    Uproszczony 'limit par': liczy ile jest par o tej samej reszcie z dzielenia przez mod.
-    Dla mod=10 sprawdza "pary w tej samej dziesiątce" (1-9,10-19,20-29,...,40-49).
-    Zwraca sumę par we wszystkich koszykach.
+    Liczy liczbę par w tych samych 'dziesiątkach':
+    1-9, 10-19, 20-29, 30-39, 40-49.
+    Zwraca sumę par (kombinacje 2-elementowe) we wszystkich koszykach.
     """
     buckets = {}
     for n in nums:
-        key = n // mod  # 0..4
+        key = n // 10  # 0..4
         buckets[key] = buckets.get(key, 0) + 1
 
     pairs = 0
     for cnt in buckets.values():
         if cnt >= 2:
-            # liczba par w grupie cnt: C(cnt,2)
-            pairs += (cnt * (cnt - 1)) // 2
+            pairs += (cnt * (cnt - 1)) // 2  # C(cnt,2)
     return pairs
 
 
@@ -266,10 +270,9 @@ def smart_ok(
     """
     nums = sorted(ticket)
 
-    # 1) Blokada układów 1-2 lub 1-3 kolejnych liczb
-    # Interpretacja:
-    # - "1-2" => maks 1 para sąsiadująca (czyli nie dopuszczamy dwóch i więcej par)
-    # - "1-3" => maks 2 pary sąsiadujące (czyli nie dopuszczamy trzech i więcej par)
+    # 1) Blokada układów kolejnych liczb
+    # - "1-2" => odrzuca kupony z >=2 parami sąsiadującymi
+    # - "1-3" => odrzuca kupony z >=3 parami sąsiadującymi
     if block_adjacent:
         runs = count_adjacent_runs(nums)
         if block_adjacent_level == "1-2":
@@ -279,9 +282,9 @@ def smart_ok(
             if runs >= 3:
                 return False
 
-    # 2) Limit par (tu: par w tej samej "dziesiątce")
+    # 2) Limit par w dziesiątkach
     if limit_pairs_enabled:
-        pairs = count_pairs_by_mod(nums, mod=10)
+        pairs = count_pairs_by_decade(nums)
         if pairs > max_pairs_in_decade:
             return False
 
@@ -292,7 +295,7 @@ def smart_ok(
             if not (ev == 3 and od == 3):
                 return False
         elif parity_rule == "3/2":
-            # Interpretacja 3/2 jako: 4/2 LUB 2/4 (czyli "blisko równowagi", ale nie idealnie)
+            # 3/2 interpretujemy jako: 4/2 lub 2/4
             if not ((ev == 4 and od == 2) or (ev == 2 and od == 4)):
                 return False
 
@@ -306,18 +309,15 @@ def generate_with_smart_filters(
     smart_kwargs: dict,
 ) -> list[dict]:
     """
-    gen_func() ma zwracać rekordy {"Typ": "...", "Kupon": [...]}
-    Tu bierzemy jego logikę (oryginał) i tylko odrzucamy kupony, które nie przechodzą filtrów.
+    gen_func() -> {"Typ": "...", "Kupon": [...]}
+    W trybie inteligentnym: generujemy jak oryginał, ale odrzucamy kupony nieprzechodzące filtrów.
     """
     out: list[dict] = []
     attempts = 0
-    needed = n_tickets
 
-    # iterujemy aż uzbieramy n_tickets, ale z limitem prób na kupon
-    while len(out) < needed:
+    while len(out) < n_tickets:
         attempts += 1
-        if attempts > needed * max_attempts_per_ticket:
-            # jeśli filtry zbyt ostre, przerywamy
+        if attempts > n_tickets * max_attempts_per_ticket:
             break
 
         rec = gen_func()
@@ -341,30 +341,40 @@ st.markdown(GOTHIC_CSS, unsafe_allow_html=True)
 
 st.markdown(
     "# 💀 Gothic $ Lotto Generator"
-    ' <span class="badge">PDF → Analiza 999 losowań → Kupony</span>',
+    ' <span class="badge">Baza: wyniki.pdf</span>',
     unsafe_allow_html=True
 )
-st.markdown('<div class="orn">$ <span>†</span> $ <span>†</span> $ — gotycki klimat, dolarowy sznyt, zimna matematyka.</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="orn">$ <span>†</span> $ <span>†</span> $ — czytelnie, gotycko i z kontrolą typowań.</div>',
+    unsafe_allow_html=True
+)
+
+# =========================
+# 📄 Wczytanie lokalnego PDF (wyniki.pdf)
+# =========================
+BASE_PDF = Path(__file__).parent / "wyniki.pdf"
 
 with st.container():
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.write("**Krok 1:** Wczytaj PDF z losowaniami (format jak w Twoim pliku: każda linia = 6 liczb 1–49).")
-    uploaded = st.file_uploader("Wgraj PDF (999 losowań)", type=["pdf"])
+    st.write("**Źródło danych:** aplikacja korzysta z lokalnego pliku `wyniki.pdf` w tym samym folderze co `app.py`.")
+    st.write(f"**Ścieżka:** `{BASE_PDF}`")
     st.markdown('</div>', unsafe_allow_html=True)
 
-if not uploaded:
-    st.info("Wrzuć PDF, żeby odpalić analizę i generowanie kuponów.")
+if not BASE_PDF.exists():
+    st.error("❌ Nie znaleziono pliku **wyniki.pdf** w repozytorium. Wrzuć go obok pliku aplikacji i zdeployuj ponownie.")
     st.stop()
 
-pdf_bytes = uploaded.read()
-
-draws = extract_draws_from_pdf(pdf_bytes)
+try:
+    draws = extract_draws_from_pdf_path(BASE_PDF)
+except Exception as e:
+    st.error(f"❌ Błąd podczas czytania PDF: {e}")
+    st.stop()
 
 if len(draws) == 0:
-    st.error("Nie udało się znaleźć losowań (linii z 6 liczbami 1–49). Sprawdź format PDF.")
+    st.error("❌ Nie udało się znaleźć losowań (linii z 6 liczbami 1–49) w `wyniki.pdf`. Sprawdź format pliku.")
     st.stop()
 
-st.success(f"✅ Wczytano losowania: **{len(draws)}** (aplikacja działa na całym PDF).")
+st.success(f"✅ Załadowano losowania: **{len(draws)}** z `wyniki.pdf`.")
 
 freq_df = compute_stats(draws)
 
@@ -380,6 +390,7 @@ with colA:
 with colB:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("⚙️ Ustawienia grup")
+
     hot_size = st.slider("Ile liczb w grupie 🔥 gorących?", 6, 35, 20, 1)
     cold_size = st.slider("Ile liczb w grupie ❄️ zimnych?", 6, 35, 20, 1)
 
@@ -409,47 +420,51 @@ with colB:
 
     st.divider()
     st.subheader("🧠 Tryb inteligentny (opcjonalny)")
-    smart_enabled = st.checkbox("✅ Włącz tryb inteligentny", value=False, help="Jeśli wyłączone — generator działa jak oryginał.")
+    smart_enabled = st.checkbox(
+        "✅ Włącz tryb inteligentny",
+        value=False,
+        help="Jeśli wyłączone — generator działa dokładnie jak oryginał (bez filtrów)."
+    )
 
-    # Domyślne wartości (gdy wyłączone — nie wpływają na wynik)
+    # domyślne (gdy smart off — nie wpływają)
     block_adjacent = False
     block_adjacent_level = "1-2"
     limit_pairs_enabled = False
     max_pairs_in_decade = 2
     parity_rule = "brak"
+    max_attempts_per_ticket = 120
 
     if smart_enabled:
-        st.caption("Zaznacz filtry. Możesz włączyć wszystkie albo tylko kilka. Parzyste/nieparzyste: wybór tylko jednego wariantu.")
-        block_adjacent = st.checkbox("Blokada zbyt częstych układów kolejnych liczb (1-2 / 1-3)", value=True)
+        st.caption("Zaznacz filtry. Możesz włączyć wszystkie albo tylko kilka.")
+        block_adjacent = st.checkbox("Blokada układów kolejnych liczb (1-2 / 1-3)", value=True)
 
         if block_adjacent:
             block_adjacent_level = st.radio(
                 "Poziom blokady kolejnych liczb",
                 ["1-2", "1-3"],
                 horizontal=True,
-                help="1-2 = nie dopuszcza ≥2 par sąsiadujących; 1-3 = nie dopuszcza ≥3 par sąsiadujących."
+                help="1-2 = odrzuca kupony z ≥2 parami sąsiadującymi. 1-3 = odrzuca kupony z ≥3 parami sąsiadującymi."
             )
 
-        limit_pairs_enabled = st.checkbox("Limit par (w tej samej dziesiątce: 1-9, 10-19, ...)", value=True)
+        limit_pairs_enabled = st.checkbox("Limit par w dziesiątkach (1-9, 10-19, ...)", value=True)
         if limit_pairs_enabled:
             max_pairs_in_decade = st.slider(
-                "Maksymalna liczba par w jednej generacji (sumarycznie po dziesiątkach)",
+                "Maksymalna liczba par (sumarycznie po dziesiątkach)",
                 min_value=0, max_value=6, value=2, step=1,
-                help="Np. jeśli masz [11,12,15] to w dziesiątce 10-19 powstają pary. Tu limitujesz ich liczbę."
+                help="Im mniejsza wartość, tym bardziej 'rozstrzelone' kupony."
             )
 
-        # Jeden wybór: 3/2 ALBO 3/3 ALBO brak
         parity_rule = st.radio(
-            "Rozkład parzyste/nieparzyste (wybierz jeden)",
+            "Rozkład parzyste/nieparzyste (jeden wybór)",
             ["brak", "3/3", "3/2"],
             horizontal=True,
-            help="3/3 = 3 parzyste i 3 nieparzyste. 3/2 = 4/2 lub 2/4 (blisko równowagi)."
+            help="3/3 = 3 parzyste i 3 nieparzyste. 3/2 = 4/2 lub 2/4."
         )
 
-        st.caption("Jeśli filtry będą za ostre, generator może nie znaleźć wystarczającej liczby kuponów.")
-        max_attempts_per_ticket = st.slider("Limit prób na kupon (gdy filtry odrzucają)", 10, 500, 120, 10)
-    else:
-        max_attempts_per_ticket = 120  # nieużywane
+        max_attempts_per_ticket = st.slider(
+            "Limit prób na kupon (gdy filtry odrzucają)",
+            10, 500, 120, 10
+        )
 
     st.divider()
     st.subheader("🎲 Generowanie kuponów")
@@ -457,11 +472,11 @@ with colB:
 
     st.markdown('</div>', unsafe_allow_html=True)
 
+
 # =========================
 # 🎬 GENERUJ
 # =========================
-if st.button("🧾 Generuj kupony"):
-
+if st.button("🚀 GENERUJ KUPONY"):
     smart_kwargs = {
         "block_adjacent": block_adjacent,
         "block_adjacent_level": block_adjacent_level,
@@ -470,8 +485,10 @@ if st.button("🧾 Generuj kupony"):
         "parity_rule": parity_rule,
     }
 
-    # --- funkcje generowania 1 rekordu zgodnie z oryginałem ---
     def gen_one_record() -> dict:
+        """
+        Jedna próbka kuponu dokładnie wg oryginału (w zależności od wybranego mode).
+        """
         if mode == "Hybryda 70/20/10 (hot/cold/mix)":
             chosen = random.choices(["hot", "cold", "mix"], weights=[0.70, 0.20, 0.10], k=1)[0]
             return {"Typ": chosen, "Kupon": gen_ticket(chosen, hot, cold, int(mix_hot_count))}
@@ -482,8 +499,7 @@ if st.button("🧾 Generuj kupony"):
         else:
             return {"Typ": "mix", "Kupon": gen_ticket("mix", hot, cold, int(mix_hot_count))}
 
-    # --- generowanie: jeśli smart off -> oryginał 1:1 ---
-    records: list[dict]
+    # jeśli smart off -> oryginał 1:1
     if not smart_enabled:
         records = [gen_one_record() for _ in range(int(n_tickets))]
     else:
@@ -493,7 +509,6 @@ if st.button("🧾 Generuj kupony"):
             max_attempts_per_ticket=int(max_attempts_per_ticket),
             smart_kwargs=smart_kwargs,
         )
-
         if len(records) < int(n_tickets):
             st.warning(
                 f"⚠️ Filtry są dość ostre: udało się wygenerować **{len(records)}** / {int(n_tickets)} kuponów. "
@@ -511,7 +526,7 @@ if st.button("🧾 Generuj kupony"):
     st.dataframe(df_out, use_container_width=True, hide_index=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Paczka do pobrania (CSV + TXT + raport grup i ustawień smart)
+    # Paczka do pobrania (CSV + TXT + raport)
     csv_bytes = df_out.to_csv(index=False).encode("utf-8")
 
     txt_lines = [
@@ -521,6 +536,7 @@ if st.button("🧾 Generuj kupony"):
     txt_bytes = ("\n".join(txt_lines)).encode("utf-8")
 
     report = {
+        "pdf_file": "wyniki.pdf",
         "draws_found": len(draws),
         "hot_size": int(hot_size),
         "cold_size": int(cold_size),
@@ -548,4 +564,4 @@ if st.button("🧾 Generuj kupony"):
         use_container_width=True,
     )
 
-st.caption("Uwaga: generator nie zwiększa realnych szans wygranej — losowania są losowe. To narzędzie do analizy i wygodnego typowania na bazie historii.")
+st.caption("Uwaga: losowania są losowe — analiza historii nie zwiększa realnych szans wygranej. To narzędzie do analizy i wygodnego typowania.")
