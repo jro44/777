@@ -637,4 +637,178 @@ def main():
 
         st.markdown('<div class="v-card">', unsafe_allow_html=True)
         st.subheader("🎛️ Wybrany tryb")
-  
+        st.write(f"**Tryb:** {mode_ui}")
+        if mode_ui == "Tylko ⚗️ mix (hot+zimne)":
+            st.write(f"**MIX:** {mix_hot_count} z gorących + {PICK_COUNT - mix_hot_count} z zimnych")
+        st.write(f"**Tryb inteligentny:** {'TAK' if smart_enabled else 'NIE'}")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.divider()
+
+    st.markdown('<div class="v-card">', unsafe_allow_html=True)
+    st.subheader("🎟️ Generator kuponów")
+
+    col_btn1, col_btn2 = st.columns(2, gap="large")
+    with col_btn1:
+        generate = st.button("🏆 GENERUJ KUPONY (6 liczb)", type="primary", use_container_width=True)
+    with col_btn2:
+        daily = st.button("🌿 TWOJE SZCZĘŚLIWE CYFRY DNIA", type="primary", use_container_width=True)
+
+    # Map UI mode to internal
+    if mode_ui == "Hybryda 70/20/10 (hot/cold/mix)":
+        base_mode_kind = "hybrid"
+    elif mode_ui == "Tylko 🔥 gorące":
+        base_mode_kind = "hot"
+    elif mode_ui == "Tylko ❄️ zimne":
+        base_mode_kind = "cold"
+    else:
+        base_mode_kind = "mix"
+
+    def gen_one_record() -> Dict:
+        if base_mode_kind == "hybrid":
+            chosen = random.choices(["hot", "cold", "mix"], weights=[0.70, 0.20, 0.10], k=1)[0]
+            return {"Typ": chosen, "Kupon": gen_ticket(chosen, hot, cold, mix_hot_count)}
+        if base_mode_kind == "hot":
+            return {"Typ": "hot", "Kupon": gen_ticket("hot", hot, cold, mix_hot_count)}
+        if base_mode_kind == "cold":
+            return {"Typ": "cold", "Kupon": gen_ticket("cold", hot, cold, mix_hot_count)}
+        return {"Typ": "mix", "Kupon": gen_ticket("mix", hot, cold, mix_hot_count)}
+
+    # ACTION 1: normal generation
+    if generate:
+        if not smart_enabled:
+            records = [gen_one_record() for _ in range(int(n_tickets))]
+        else:
+            smart_kwargs = {
+                "block_run_2": block_run_2,
+                "block_run_3": block_run_3,
+                "max_adjacent_pairs": max_adj_pairs,
+                "even_odd_choice": even_odd_choice
+            }
+            records = generate_with_smart_filters(
+                gen_func=gen_one_record,
+                n_tickets=int(n_tickets),
+                max_attempts_per_ticket=int(max_attempts_per_ticket),
+                smart_kwargs=smart_kwargs
+            )
+            if len(records) < int(n_tickets):
+                st.warning(
+                    f"⚠️ Filtry są dość ostre: udało się wygenerować **{len(records)}** / {int(n_tickets)} kuponów. "
+                    "Poluzuj filtry albo zwiększ limit prób."
+                )
+
+        st.markdown("### Wyniki")
+        for i, r in enumerate(records, start=1):
+            t = r["Kupon"]
+            nums = " ".join([f"{n:02d}" for n in t])
+            ev, od = even_odd_split(t)
+            pairs = count_adjacent_pairs(sorted(t))
+            st.markdown(
+                f'<div class="v-row"><b>Kupon #{i:03d}</b> '
+                f'<span class="v-muted">[{r["Typ"]}]</span> — {nums} '
+                f'<span class="v-muted"> | parzyste/nieparzyste: {ev}/{od} | pary: {pairs}</span></div>',
+                unsafe_allow_html=True
+            )
+
+        settings = {
+            "mode": mode_ui,
+            "n_tickets": int(n_tickets),
+            "hot_size": int(hot_size),
+            "cold_size": int(cold_size),
+            "mix_hot_count": int(mix_hot_count),
+            "smart_enabled": bool(smart_enabled),
+            "smart_filters": {
+                "block_run_2": bool(block_run_2),
+                "block_run_3": bool(block_run_3),
+                "max_adjacent_pairs": max_adj_pairs,
+                "even_odd_choice": even_odd_choice,
+                "max_attempts_per_ticket": int(max_attempts_per_ticket)
+            } if smart_enabled else {}
+        }
+
+        zip_bytes = make_zip_package(
+            records=records,
+            draws_count=len(draws),
+            hot=hot,
+            cold=cold,
+            settings=settings
+        )
+
+        st.download_button(
+            "⬇️ Pobierz paczkę (ZIP: kupony + raport)",
+            data=zip_bytes,
+            file_name="generator_victory_lotto_kupony.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
+
+        st.caption("Uwaga: to generator analityczno-rozrywkowy — historia losowań nie gwarantuje wygranej.")
+
+    # ACTION 2: daily lucky numbers
+    if daily:
+        # Use last 10 and last 2 draws like in Eurojackpot
+        prefer_parity = parity_bias_from_last_n(draws, 10)
+        # Threshold mid-point for 1..49 is about 24/25
+        prefer_level = high_low_bias_from_last_two(draws, threshold=24)
+        target_spread = avg_spread_last_n(draws, 10)
+
+        daily_set = pick_daily_set_from_hot(
+            hot=hot,
+            pick_count=PICK_COUNT,
+            nmin=NUM_MIN,
+            nmax=NUM_MAX,
+            prefer_parity=prefer_parity,
+            prefer_level=prefer_level,
+            threshold=24,
+            target_spread=target_spread,
+            max_attempts=600
+        )
+
+        nums = " ".join(f"{n:02d}" for n in daily_set)
+        ev, od = even_odd_split(daily_set)
+        pairs = count_adjacent_pairs(sorted(daily_set))
+
+        def pref_to_text(p: str) -> str:
+            if p == "EVEN":
+                return "parzyste"
+            if p == "ODD":
+                return "nieparzyste"
+            return "dowolnie"
+
+        def level_to_text(p: str) -> str:
+            if p == "LOW":
+                return "niższe"
+            if p == "HIGH":
+                return "wyższe"
+            return "dowolnie"
+
+        st.markdown("### 🌿 Twoje szczęśliwe cyfry dnia")
+        st.markdown(
+            f'<div class="v-row"><b>Zestaw dnia</b> — {nums} '
+            f'<span class="v-muted"> | parzyste/nieparzyste: {ev}/{od} | pary: {pairs}</span></div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown("#### Jak to ustaliłem?")
+        st.markdown(
+            f"- Ostatnie 10 losowań: analiza parzystości → dziś preferencja: **{pref_to_text(prefer_parity)}** (dobór z puli gorących)."
+        )
+        st.markdown(
+            f"- Ostatnie 2 losowania były bardziej **{level_to_text(prefer_level)}** → dziś typujemy **{level_to_text(prefer_level)}** (ale nadal z gorących)."
+        )
+        st.markdown(
+            f"- Średni „rozstrzał” (max-min) z ostatnich 10 losowań: **{target_spread:.1f}** → zestaw dnia próbuje trzymać podobny zakres."
+        )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    with st.expander("📌 Diagnostyka (TOP/LOW)"):
+        st.write("TOP 15 najczęstszych liczb:")
+        st.dataframe(freq_df.head(15), use_container_width=True, hide_index=True)
+
+        st.write("LOW 15 najrzadszych liczb:")
+        st.dataframe(freq_df.tail(15).sort_values(["Wystąpienia", "Liczba"]), use_container_width=True, hide_index=True)
+
+
+if __name__ == "__main__":
+    main()
