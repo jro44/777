@@ -9,8 +9,24 @@ from typing import List, Dict, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
-from pypdf import PdfReader
-from pypdf.errors import PdfReadError
+
+# PDF engines:
+# 1) PyMuPDF (fitz) - fast & robust
+# 2) pypdf - fallback
+try:
+    import fitz  # PyMuPDF
+    HAS_PYMUPDF = True
+except Exception:
+    HAS_PYMUPDF = False
+
+try:
+    from pypdf import PdfReader
+    from pypdf.errors import PdfReadError
+    HAS_PYPDF = True
+except Exception:
+    HAS_PYPDF = False
+    PdfReader = None
+    PdfReadError = Exception
 
 
 # =========================================================
@@ -25,7 +41,7 @@ PICK_COUNT = 6
 
 # =========================================================
 # UI STYLE (LIGHT BACKGROUND + GREEN ACCENTS + DARK TEXT)
-# Stable after reruns (no css-* selectors)
+# Stable on mobile/tablet/pc
 # =========================================================
 LIGHT_GREEN_CSS = """
 <style>
@@ -42,7 +58,6 @@ LIGHT_GREEN_CSS = """
   --shadow: 0 10px 28px rgba(0,0,0,.08);
 }
 
-/* App background (non-transparent) */
 .stApp{
   background-color: var(--bg0) !important;
   background-image:
@@ -52,13 +67,11 @@ LIGHT_GREEN_CSS = """
   color: var(--txt) !important;
 }
 
-/* Dark readable text ONLY inside Streamlit container */
 [data-testid="stAppViewContainer"],
 [data-testid="stAppViewContainer"] *{
   color: var(--txt);
 }
 
-/* Headings */
 [data-testid="stAppViewContainer"] h1,
 [data-testid="stAppViewContainer"] h2,
 [data-testid="stAppViewContainer"] h3,
@@ -71,14 +84,12 @@ LIGHT_GREEN_CSS = """
   text-transform: uppercase;
 }
 
-/* Layout */
 .block-container{
   padding-top: 2.0rem;
   padding-bottom: 2.5rem;
   max-width: 1100px;
 }
 
-/* Cards */
 .v-card{
   background: linear-gradient(180deg, var(--card), var(--card2));
   border: 1px solid var(--border);
@@ -87,7 +98,6 @@ LIGHT_GREEN_CSS = """
   padding: 16px 16px 12px 16px;
 }
 
-/* Pills */
 .v-pill{
   display:inline-block;
   padding: 6px 10px;
@@ -99,14 +109,12 @@ LIGHT_GREEN_CSS = """
   color: #064e3b !important;
 }
 
-/* Muted text */
 .v-muted{
   opacity: .82;
   font-size: .92rem;
   color: var(--mut) !important;
 }
 
-/* Sidebar */
 section[data-testid="stSidebar"]{
   background: linear-gradient(180deg, rgba(0, 194, 122, 0.10) 0%, rgba(255,255,255,0.75) 100%) !important;
   border-right: 1px solid rgba(0, 168, 107, 0.16);
@@ -115,14 +123,12 @@ section[data-testid="stSidebar"] *{
   color: var(--txt) !important;
 }
 
-/* Inputs */
 div[data-baseweb="select"] > div,
 div[data-baseweb="input"] > div,
 div[data-baseweb="textarea"] > div{
   border-radius: 14px !important;
 }
 
-/* Primary button */
 div.stButton > button[kind="primary"]{
   background: linear-gradient(90deg, var(--green) 0%, var(--green2) 100%) !important;
   color: #052e16 !important;
@@ -138,7 +144,6 @@ div.stButton > button[kind="primary"]:hover{
   transform: translateY(-1px);
 }
 
-/* Result row */
 .v-row{
   background: rgba(0, 168, 107, 0.06);
   border: 1px solid rgba(0, 168, 107, 0.18);
@@ -148,20 +153,12 @@ div.stButton > button[kind="primary"]:hover{
   color: var(--txt) !important;
 }
 
-/* Dataframe */
 [data-testid="stDataFrame"]{
   border-radius: 16px !important;
   overflow: hidden !important;
   border: 1px solid rgba(0, 168, 107, 0.22) !important;
 }
 
-/* Caption */
-[data-testid="stCaptionContainer"],
-[data-testid="stCaptionContainer"] *{
-  color: rgba(51,65,85,0.95) !important;
-}
-
-/* Mobile */
 @media (max-width: 640px){
   .block-container{ padding-left: 1rem; padding-right: 1rem; }
   div.stButton > button[kind="primary"]{ width: 100% !important; }
@@ -171,66 +168,111 @@ div.stButton > button[kind="primary"]:hover{
 
 
 # =========================================================
-# PDF PARSING (robust) + CACHE
+# PDF PARSING
 # =========================================================
 LINE_6NUM = re.compile(
     r"(?<!\d)([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)(?!\d)"
 )
 
-@st.cache_data(show_spinner=False)
-def extract_draws_from_pdf_bytes(pdf_bytes: bytes) -> List[List[int]]:
-    """
-    Heavy operation -> cached by content.
-    Extracts lines that look like: 6 numbers 1..49
-    """
+def _validate_pdf_bytes(pdf_bytes: bytes) -> None:
     if not pdf_bytes.startswith(b"%PDF"):
         head = pdf_bytes[:240].decode("utf-8", errors="replace")
         raise ValueError(
-            "Plik 'wyniki.pdf' NIE wygląda jak prawdziwy PDF (brak nagłówka %PDF).\n"
-            "Najczęściej oznacza to wskaźnik Git LFS lub uszkodzony upload.\n\n"
-            f"Pierwsze znaki pliku:\n{head}"
+            "Plik 'wyniki.pdf' nie wygląda jak prawdziwy PDF (brak nagłówka %PDF).\n"
+            "Jeśli używasz Git LFS, do repo mógł trafić tylko pointer.\n\n"
+            f"Początek pliku:\n{head}"
         )
 
-    try:
-        reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
-    except PdfReadError as e:
-        raise PdfReadError(f"PdfReadError: {e}\nPDF może być uszkodzony lub niekompletny.")
-
+def _extract_draws_from_text(text: str) -> List[List[int]]:
     draws: List[List[int]] = []
-    for page in reader.pages:
-        try:
-            text = page.extract_text() or ""
-        except Exception:
-            text = ""
-
-        for m in LINE_6NUM.finditer(text):
-            nums = [int(m.group(i)) for i in range(1, 7)]
-            if all(NUM_MIN <= n <= NUM_MAX for n in nums) and len(set(nums)) == 6:
-                draws.append(sorted(nums))
-
+    for m in LINE_6NUM.finditer(text or ""):
+        nums = [int(m.group(i)) for i in range(1, 7)]
+        if all(NUM_MIN <= n <= NUM_MAX for n in nums) and len(set(nums)) == 6:
+            draws.append(sorted(nums))
     return draws
 
+def _read_pdf_text_pymupdf(pdf_bytes: bytes) -> str:
+    if not HAS_PYMUPDF:
+        raise RuntimeError("PyMuPDF not available")
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    texts = []
+    for page in doc:
+        texts.append(page.get_text("text") or "")
+    doc.close()
+    return "\n".join(texts)
+
+def _read_pdf_text_pypdf(pdf_bytes: bytes) -> str:
+    if not HAS_PYPDF:
+        raise RuntimeError("pypdf not available")
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
+    except Exception as e:
+        raise PdfReadError(str(e))
+    texts = []
+    for page in reader.pages:
+        try:
+            texts.append(page.extract_text() or "")
+        except Exception:
+            texts.append("")
+    return "\n".join(texts)
+
+@st.cache_data(show_spinner=False)
+def load_draws_cached(pdf_bytes: bytes) -> List[List[int]]:
+    """
+    Cached by pdf_bytes content -> fast on reruns.
+    Tries PyMuPDF first (robust), then pypdf fallback.
+    """
+    _validate_pdf_bytes(pdf_bytes)
+
+    last_err = None
+
+    # 1) PyMuPDF
+    if HAS_PYMUPDF:
+        try:
+            text = _read_pdf_text_pymupdf(pdf_bytes)
+            draws = _extract_draws_from_text(text)
+            if draws:
+                return draws
+        except Exception as e:
+            last_err = e
+
+    # 2) pypdf fallback
+    if HAS_PYPDF:
+        try:
+            text = _read_pdf_text_pypdf(pdf_bytes)
+            draws = _extract_draws_from_text(text)
+            if draws:
+                return draws
+        except Exception as e:
+            last_err = e
+
+    # If both engines failed or extracted nothing
+    if last_err:
+        raise RuntimeError(f"Nie udało się odczytać PDF / wyciągnąć losowań. Ostatni błąd: {last_err}")
+    raise RuntimeError("Nie udało się wyciągnąć losowań z PDF (brak dopasowań 6 liczb 1–49).")
+
+
+# =========================================================
+# STATS & GROUPS (cached)
+# =========================================================
 @st.cache_data(show_spinner=False)
 def compute_stats_cached(draws: List[List[int]]) -> pd.DataFrame:
     flat = [n for d in draws for n in d]
     c = Counter(flat)
     rows = [{"Liczba": n, "Wystąpienia": c.get(n, 0)} for n in range(NUM_MIN, NUM_MAX + 1)]
-    return (
-        pd.DataFrame(rows)
-        .sort_values(["Wystąpienia", "Liczba"], ascending=[False, True])
-        .reset_index(drop=True)
-    )
+    df = pd.DataFrame(rows).sort_values(["Wystąpienia", "Liczba"], ascending=[False, True]).reset_index(drop=True)
+    return df
 
-
-# =========================================================
-# GROUPS + GENERATION
-# =========================================================
 def build_groups(freq_df: pd.DataFrame, hot_size: int, cold_size: int) -> Tuple[List[int], List[int], List[int]]:
     hot = freq_df.head(hot_size)["Liczba"].tolist()
     cold = freq_df.tail(cold_size)["Liczba"].tolist()
     neutral = [n for n in range(NUM_MIN, NUM_MAX + 1) if n not in hot and n not in cold]
     return hot, cold, neutral
 
+
+# =========================================================
+# GENERATION
+# =========================================================
 def pick_unique(pool: List[int], k: int) -> List[int]:
     pool = list(dict.fromkeys(pool))
     if len(pool) < k:
@@ -325,7 +367,7 @@ def generate_with_smart_filters(
 
 
 # =========================================================
-# "TWOJE SZCZĘŚLIWE CYFRY DNIA" (like Eurojackpot style)
+# "TWOJE SZCZĘŚLIWE CYFRY DNIA"
 # =========================================================
 def flatten_last_n(draws: List[List[int]], n: int) -> List[int]:
     return [x for d in draws[:n] for x in d]
@@ -334,7 +376,6 @@ def parity_bias_from_last_n(draws: List[List[int]], n: int) -> str:
     nums = flatten_last_n(draws, n)
     ev = sum(1 for x in nums if x % 2 == 0)
     od = len(nums) - ev
-    # contrarian (if last had more evens -> prefer odds, etc.)
     if ev > od:
         return "ODD"
     if od > ev:
@@ -348,7 +389,6 @@ def high_low_bias_from_last_two(draws: List[List[int]], threshold: int) -> str:
     all_nums = [x for d in last2 for x in d]
     low = sum(1 for x in all_nums if x <= threshold)
     high = len(all_nums) - low
-    # contrarian with margin
     if low >= high + 2:
         return "HIGH"
     if high >= low + 2:
@@ -364,11 +404,11 @@ def pick_daily_set_from_hot(
     pick_count: int,
     nmin: int,
     nmax: int,
-    prefer_parity: str,     # "EVEN" | "ODD" | "ANY"
-    prefer_level: str,      # "LOW" | "HIGH" | "ANY"
+    prefer_parity: str,
+    prefer_level: str,
     threshold: int,
     target_spread: Optional[float] = None,
-    max_attempts: int = 600
+    max_attempts: int = 700
 ) -> List[int]:
     hot_unique = sorted(set([x for x in hot if nmin <= x <= nmax]))
     if len(hot_unique) < pick_count:
@@ -376,13 +416,11 @@ def pick_daily_set_from_hot(
 
     pool = hot_unique[:]
 
-    # level preference (soft)
     if prefer_level != "ANY":
         filtered = [x for x in pool if (x <= threshold)] if prefer_level == "LOW" else [x for x in pool if (x > threshold)]
         if len(filtered) >= pick_count:
             pool = filtered
 
-    # parity preference (soft)
     if prefer_parity != "ANY":
         filtered = [x for x in pool if (x % 2 == 0)] if prefer_parity == "EVEN" else [x for x in pool if (x % 2 == 1)]
         if len(filtered) >= pick_count:
@@ -412,7 +450,6 @@ def pick_daily_set_from_hot(
             best_score = score
             best = cand
 
-        # early accept if both preferences have clear majority
         if prefer_parity != "ANY" and prefer_level != "ANY":
             ev, od = even_odd_split(cand)
             low = sum(1 for x in cand if x <= threshold)
@@ -426,7 +463,7 @@ def pick_daily_set_from_hot(
 
 
 # =========================================================
-# EXPORT HELPERS
+# EXPORT
 # =========================================================
 def records_to_dataframe(records: List[Dict]) -> pd.DataFrame:
     return pd.DataFrame({
@@ -450,6 +487,7 @@ def make_zip_package(records: List[Dict], draws_count: int, hot: List[int], cold
         "hot": sorted(hot),
         "cold": sorted(cold),
         "settings": settings,
+        "pdf_engine": "pymupdf" if HAS_PYMUPDF else ("pypdf" if HAS_PYPDF else "none"),
     }
     report_bytes = (pd.Series(report).to_json(indent=2, force_ascii=False)).encode("utf-8")
 
@@ -466,21 +504,14 @@ def make_zip_package(records: List[Dict], draws_count: int, hot: List[int], cold
 # STREAMLIT APP
 # =========================================================
 def main():
-    st.set_page_config(
-        page_title="Generator-Victory Lotto",
-        page_icon="🏆",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
+    st.set_page_config(page_title="Generator-Victory Lotto", page_icon="🏆", layout="wide", initial_sidebar_state="expanded")
     st.markdown(LIGHT_GREEN_CSS, unsafe_allow_html=True)
 
     st.title(APP_TITLE)
-    st.write("Generator typowań Lotto na bazie historii losowań z pliku **wyniki.pdf** (zakres **1–49**, typuje **6 liczb**).")
-    st.caption("Źródło danych: lokalny plik `wyniki.pdf` w repo (obok `app.py`). PDF + statystyki są cachowane (płynnie na telefonie).")
+    st.write("Generator typowań Lotto na bazie historii losowań z pliku **wyniki.pdf** (1–49, typuje 6 liczb).")
+    st.caption("Stabilny na telefonach/tabletach/PC: cache, szybkie renderowanie, odporny odczyt PDF (PyMuPDF + fallback).")
 
-    pdf_path = Path(os.getcwd()) / PDF_FILENAME
-
-    # Session cache for outputs (avoid regen on widget changes)
+    # Session caches: do not recompute on slider moves
     if "last_records" not in st.session_state:
         st.session_state["last_records"] = []
     if "last_settings" not in st.session_state:
@@ -488,7 +519,8 @@ def main():
     if "last_daily" not in st.session_state:
         st.session_state["last_daily"] = None
 
-    # Sidebar settings
+    pdf_path = Path(os.getcwd()) / PDF_FILENAME
+
     with st.sidebar:
         st.header("⚙️ Ustawienia")
 
@@ -544,45 +576,42 @@ def main():
         st.subheader("⚡ Wydajność")
         preview_limit = st.slider("Ile kuponów pokazać w podglądzie (ładnie)", 10, 200, 60, 10)
 
-    # Load & analyze (cached)
+    # Load PDF bytes & parse draws (cached) — robust start
+    st.markdown('<div class="v-card">', unsafe_allow_html=True)
+    st.subheader("📄 Dane wejściowe")
+    st.write(f"Plik: `{pdf_path}`")
+    st.write(f"Silnik PDF: **{'PyMuPDF (fitz)' if HAS_PYMUPDF else 'pypdf (fallback)'}**")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if not pdf_path.exists():
+        st.error(f"❌ Nie znaleziono `{PDF_FILENAME}` obok `app.py`. Dodaj plik do repo i zrób Reboot.")
+        st.stop()
+
+    try:
+        pdf_bytes = pdf_path.read_bytes()
+        draws = load_draws_cached(pdf_bytes)
+    except Exception as e:
+        st.error("❌ Aplikacja nie mogła wczytać PDF albo wyciągnąć losowań.")
+        st.code(str(e))
+        st.stop()
+
+    if len(draws) == 0:
+        st.error("❌ Nie znaleziono losowań w PDF (6 liczb 1–49).")
+        st.stop()
+
+    freq_df = compute_stats_cached(draws)
+
+    hot, cold, _neutral = build_groups(freq_df, hot_size=hot_size, cold_size=cold_size)
+
+    # Layout
     left, right = st.columns([1.2, 0.8], gap="large")
 
     with left:
         st.markdown('<div class="v-card">', unsafe_allow_html=True)
-        st.subheader("📄 Dane wejściowe")
-        st.write(f"Ścieżka PDF: `{pdf_path}`")
-
-        if not pdf_path.exists():
-            st.error(f"❌ Nie znaleziono pliku `{PDF_FILENAME}`. Dodaj go do repo obok pliku aplikacji.")
-            st.stop()
-
-        try:
-            pdf_bytes = pdf_path.read_bytes()
-            draws = extract_draws_from_pdf_bytes(pdf_bytes)
-        except ValueError as e:
-            st.error("❌ Problem z plikiem `wyniki.pdf` (to nie jest prawdziwy PDF / Git LFS pointer).")
-            st.code(str(e))
-            st.stop()
-        except Exception as e:
-            st.error("❌ Błąd podczas czytania PDF (może być uszkodzony / niepełny).")
-            st.code(str(e))
-            st.stop()
-
-        if len(draws) == 0:
-            st.error("❌ Nie udało się znaleźć losowań (linii z 6 liczbami 1–49) w PDF.")
-            st.stop()
-
-        st.success(f"✅ Załadowano losowania: **{len(draws)}**")
-        st.markdown('<div class="v-muted">PDF i analiza są cachowane — zmiana suwaków nie powinna powodować lagów.</div>', unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown('<div class="v-card">', unsafe_allow_html=True)
         st.subheader("📊 Częstotliwość 1–49")
-        freq_df = compute_stats_cached(draws)
+        st.success(f"✅ Losowań w bazie: **{len(draws)}**")
         st.dataframe(freq_df, use_container_width=True, hide_index=True)
         st.markdown("</div>", unsafe_allow_html=True)
-
-    hot, cold, _neutral = build_groups(freq_df, hot_size=hot_size, cold_size=cold_size)
 
     with right:
         st.markdown('<div class="v-card">', unsafe_allow_html=True)
@@ -605,8 +634,198 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
-
     st.markdown('<div class="v-card">', unsafe_allow_html=True)
     st.subheader("🎟️ Generator")
 
-    col_btn1, 
+    col_btn1, col_btn2 = st.columns(2, gap="large")
+    with col_btn1:
+        generate = st.button("🏆 GENERUJ KUPONY (6 liczb)", type="primary", use_container_width=True)
+    with col_btn2:
+        daily = st.button("🌿 TWOJE SZCZĘŚLIWE CYFRY DNIA", type="primary", use_container_width=True)
+
+    # Map UI mode to internal
+    if mode_ui == "Hybryda 70/20/10 (hot/cold/mix)":
+        base_mode_kind = "hybrid"
+    elif mode_ui == "Tylko 🔥 gorące":
+        base_mode_kind = "hot"
+    elif mode_ui == "Tylko ❄️ zimne":
+        base_mode_kind = "cold"
+    else:
+        base_mode_kind = "mix"
+
+    def gen_one_record() -> Dict:
+        if base_mode_kind == "hybrid":
+            chosen = random.choices(["hot", "cold", "mix"], weights=[0.70, 0.20, 0.10], k=1)[0]
+            return {"Typ": chosen, "Kupon": gen_ticket(chosen, hot, cold, mix_hot_count)}
+        if base_mode_kind == "hot":
+            return {"Typ": "hot", "Kupon": gen_ticket("hot", hot, cold, mix_hot_count)}
+        if base_mode_kind == "cold":
+            return {"Typ": "cold", "Kupon": gen_ticket("cold", hot, cold, mix_hot_count)}
+        return {"Typ": "mix", "Kupon": gen_ticket("mix", hot, cold, mix_hot_count)}
+
+    # Generate tickets on click (store in session_state)
+    if generate:
+        progress = st.progress(0)
+        status = st.empty()
+
+        with st.spinner("Generuję kupony..."):
+            if not smart_enabled:
+                recs: List[Dict] = []
+                total = int(n_tickets)
+                for i in range(total):
+                    recs.append(gen_one_record())
+                    if (i + 1) % 10 == 0 or (i + 1) == total:
+                        progress.progress(int((i + 1) / total * 100))
+                        status.write(f"Postęp: {i+1}/{total}")
+            else:
+                smart_kwargs = {
+                    "block_run_2": block_run_2,
+                    "block_run_3": block_run_3,
+                    "max_adjacent_pairs": max_adj_pairs,
+                    "even_odd_choice": even_odd_choice
+                }
+                recs = generate_with_smart_filters(
+                    gen_func=gen_one_record,
+                    n_tickets=int(n_tickets),
+                    max_attempts_per_ticket=int(max_attempts_per_ticket),
+                    smart_kwargs=smart_kwargs
+                )
+                progress.progress(100)
+                status.write(f"Postęp: {len(recs)}/{int(n_tickets)}")
+
+        progress.empty()
+        status.empty()
+
+        if smart_enabled and len(recs) < int(n_tickets):
+            st.warning(
+                f"⚠️ Filtry są ostre: wygenerowano **{len(recs)}** / {int(n_tickets)} kuponów. "
+                "Poluzuj filtry albo zwiększ limit prób."
+            )
+
+        st.session_state["last_records"] = recs
+        st.session_state["last_settings"] = {
+            "mode": mode_ui,
+            "n_tickets": int(n_tickets),
+            "hot_size": int(hot_size),
+            "cold_size": int(cold_size),
+            "mix_hot_count": int(mix_hot_count),
+            "smart_enabled": bool(smart_enabled),
+            "smart_filters": {
+                "block_run_2": bool(block_run_2),
+                "block_run_3": bool(block_run_3),
+                "max_adjacent_pairs": max_adj_pairs,
+                "even_odd_choice": even_odd_choice,
+                "max_attempts_per_ticket": int(max_attempts_per_ticket)
+            } if smart_enabled else {}
+        }
+
+    # Daily on click (store in session_state)
+    if daily:
+        prefer_parity = parity_bias_from_last_n(draws, 10)
+        prefer_level = high_low_bias_from_last_two(draws, threshold=24)
+        target_spread = avg_spread_last_n(draws, 10)
+
+        daily_set = pick_daily_set_from_hot(
+            hot=hot,
+            pick_count=PICK_COUNT,
+            nmin=NUM_MIN,
+            nmax=NUM_MAX,
+            prefer_parity=prefer_parity,
+            prefer_level=prefer_level,
+            threshold=24,
+            target_spread=target_spread,
+            max_attempts=700
+        )
+
+        st.session_state["last_daily"] = {
+            "set": daily_set,
+            "prefer_parity": prefer_parity,
+            "prefer_level": prefer_level,
+            "target_spread": target_spread
+        }
+
+    # Render daily
+    if st.session_state.get("last_daily") is not None:
+        info = st.session_state["last_daily"]
+        daily_set = info["set"]
+        nums = " ".join(f"{n:02d}" for n in daily_set)
+        ev, od = even_odd_split(daily_set)
+        pairs = count_adjacent_pairs(sorted(daily_set))
+
+        def pref_to_text(p: str) -> str:
+            if p == "EVEN":
+                return "parzyste"
+            if p == "ODD":
+                return "nieparzyste"
+            return "dowolnie"
+
+        def level_to_text(p: str) -> str:
+            if p == "LOW":
+                return "niższe"
+            if p == "HIGH":
+                return "wyższe"
+            return "dowolnie"
+
+        st.markdown("### 🌿 Twoje szczęśliwe cyfry dnia")
+        st.markdown(
+            f'<div class="v-row"><b>Zestaw dnia</b> — {nums} '
+            f'<span class="v-muted"> | parzyste/nieparzyste: {ev}/{od} | pary: {pairs}</span></div>',
+            unsafe_allow_html=True
+        )
+        st.markdown("#### Jak to wyliczam?")
+        st.markdown(f"- Ostatnie 10 wyników: przewaga parzystych/nieparzystych → dziś: **{pref_to_text(info['prefer_parity'])}** (z puli hot).")
+        st.markdown(f"- Ostatnie 2 wyniki: trend niskie/wysokie → dziś: **{level_to_text(info['prefer_level'])}** (z puli hot).")
+        st.markdown(f"- Średni rozstrzał (10 wyników): **{info['target_spread']:.1f}** → dobieram zestaw o podobnym rozstrzale.")
+
+    # Render generated tickets
+    records = st.session_state.get("last_records", [])
+    if records:
+        st.markdown("### 🎯 Wygenerowane kupony")
+
+        df_out = records_to_dataframe(records)
+
+        preview_n = min(int(preview_limit), len(records))
+        st.caption(f"Podgląd pierwszych **{preview_n}** kuponów (pełna lista w tabeli).")
+
+        for i in range(preview_n):
+            nums = df_out.iloc[i]["Kupon"]
+            typ = df_out.iloc[i]["Typ"]
+            t = [int(x) for x in nums.split()]
+            ev, od = even_odd_split(t)
+            pairs = count_adjacent_pairs(sorted(t))
+            st.markdown(
+                f'<div class="v-row"><b>Kupon #{i+1:03d}</b> '
+                f'<span class="v-muted">[{typ}]</span> — {nums} '
+                f'<span class="v-muted"> | parzyste/nieparzyste: {ev}/{od} | pary: {pairs}</span></div>',
+                unsafe_allow_html=True
+            )
+
+        st.markdown("#### Pełna tabela")
+        st.dataframe(df_out, use_container_width=True, hide_index=True)
+
+        zip_bytes = make_zip_package(
+            records=records,
+            draws_count=len(draws),
+            hot=hot,
+            cold=cold,
+            settings=st.session_state.get("last_settings", {})
+        )
+        st.download_button(
+            "⬇️ Pobierz paczkę (ZIP: kupony + raport)",
+            data=zip_bytes,
+            file_name="generator_victory_lotto_kupony.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    with st.expander("📌 Diagnostyka (TOP/LOW)"):
+        st.write("TOP 15 najczęstszych liczb:")
+        st.dataframe(freq_df.head(15), use_container_width=True, hide_index=True)
+        st.write("LOW 15 najrzadszych liczb:")
+        st.dataframe(freq_df.tail(15).sort_values(["Wystąpienia", "Liczba"]), use_container_width=True, hide_index=True)
+
+
+if __name__ == "__main__":
+    main()
