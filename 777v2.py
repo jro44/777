@@ -6,6 +6,7 @@ import random
 from collections import Counter
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -40,8 +41,8 @@ PICK_COUNT = 6
 
 
 # =========================================================
-# UI STYLE (LIGHT BACKGROUND + GREEN ACCENTS + DARK TEXT)
-# Stable on mobile/tablet/pc
+# UI STYLE (LIGHT BACKGROUND + GREEN ACCENTS + BLACK TEXT)
+# Mobile/tablet/desktop friendly
 # =========================================================
 LIGHT_GREEN_CSS = """
 <style>
@@ -50,8 +51,8 @@ LIGHT_GREEN_CSS = """
   --bg1:#ffffff;
   --card:#ffffff;
   --card2:#f7fffb;
-  --txt:#0b1b2b;
-  --mut:#334155;
+  --txt:#000000;
+  --mut:#1f2937;
   --green:#00a86b;
   --green2:#00c27a;
   --border: rgba(0,168,107,0.22);
@@ -61,15 +62,15 @@ LIGHT_GREEN_CSS = """
 .stApp{
   background-color: var(--bg0) !important;
   background-image:
-    radial-gradient(1100px 700px at 12% 10%, rgba(0, 194, 122, 0.12), transparent 58%),
-    radial-gradient(900px 600px at 92% 18%, rgba(0, 168, 107, 0.10), transparent 55%),
+    radial-gradient(1100px 700px at 12% 10%, rgba(0, 194, 122, 0.10), transparent 58%),
+    radial-gradient(900px 600px at 92% 18%, rgba(0, 168, 107, 0.08), transparent 55%),
     linear-gradient(180deg, var(--bg0), var(--bg1)) !important;
   color: var(--txt) !important;
 }
 
 [data-testid="stAppViewContainer"],
 [data-testid="stAppViewContainer"] *{
-  color: var(--txt);
+  color: var(--txt) !important;
 }
 
 [data-testid="stAppViewContainer"] h1,
@@ -106,21 +107,18 @@ LIGHT_GREEN_CSS = """
   border: 1px solid rgba(0, 168, 107, 0.28);
   background: rgba(0, 168, 107, 0.10);
   font-weight: 900;
-  color: #064e3b !important;
+  color: #000000 !important;
 }
 
 .v-muted{
-  opacity: .82;
+  opacity: .86;
   font-size: .92rem;
   color: var(--mut) !important;
 }
 
 section[data-testid="stSidebar"]{
-  background: linear-gradient(180deg, rgba(0, 194, 122, 0.10) 0%, rgba(255,255,255,0.75) 100%) !important;
+  background: linear-gradient(180deg, rgba(0, 194, 122, 0.08) 0%, rgba(255,255,255,0.85) 100%) !important;
   border-right: 1px solid rgba(0, 168, 107, 0.16);
-}
-section[data-testid="stSidebar"] *{
-  color: var(--txt) !important;
 }
 
 div[data-baseweb="select"] > div,
@@ -131,7 +129,7 @@ div[data-baseweb="textarea"] > div{
 
 div.stButton > button[kind="primary"]{
   background: linear-gradient(90deg, var(--green) 0%, var(--green2) 100%) !important;
-  color: #052e16 !important;
+  color: #000000 !important;
   border: 0 !important;
   border-radius: 14px !important;
   padding: 0.80rem 1.10rem !important;
@@ -150,7 +148,7 @@ div.stButton > button[kind="primary"]:hover{
   border-radius: 14px;
   padding: 10px 12px;
   margin: 8px 0;
-  color: var(--txt) !important;
+  color: #000000 !important;
 }
 
 [data-testid="stDataFrame"]{
@@ -168,11 +166,15 @@ div.stButton > button[kind="primary"]:hover{
 
 
 # =========================================================
-# PDF PARSING
+# PDF PARSING (robust) + CACHE
 # =========================================================
 LINE_6NUM = re.compile(
     r"(?<!\d)([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)\s+([0-4]?\d)(?!\d)"
 )
+
+DATE_RE_1 = re.compile(r"(?<!\d)(\d{2}[./-]\d{2}[./-]\d{4})(?!\d)")
+DATE_RE_2 = re.compile(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)")
+DRAWNO_RE = re.compile(r"(?<!\d)(\d{4,5})(?!\d)")
 
 def _validate_pdf_bytes(pdf_bytes: bytes) -> None:
     if not pdf_bytes.startswith(b"%PDF"):
@@ -182,14 +184,6 @@ def _validate_pdf_bytes(pdf_bytes: bytes) -> None:
             "Jeśli używasz Git LFS, do repo mógł trafić tylko pointer.\n\n"
             f"Początek pliku:\n{head}"
         )
-
-def _extract_draws_from_text(text: str) -> List[List[int]]:
-    draws: List[List[int]] = []
-    for m in LINE_6NUM.finditer(text or ""):
-        nums = [int(m.group(i)) for i in range(1, 7)]
-        if all(NUM_MIN <= n <= NUM_MAX for n in nums) and len(set(nums)) == 6:
-            draws.append(sorted(nums))
-    return draws
 
 def _read_pdf_text_pymupdf(pdf_bytes: bytes) -> str:
     if not HAS_PYMUPDF:
@@ -216,40 +210,121 @@ def _read_pdf_text_pypdf(pdf_bytes: bytes) -> str:
             texts.append("")
     return "\n".join(texts)
 
-@st.cache_data(show_spinner=False)
-def load_draws_cached(pdf_bytes: bytes) -> List[List[int]]:
+def _try_parse_date(date_str: str) -> Optional[datetime]:
+    s = (date_str or "").strip()
+    for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except Exception:
+            continue
+    return None
+
+def _extract_records_from_text(text: str) -> List[Dict]:
     """
-    Cached by pdf_bytes content -> fast on reruns.
+    Best-effort extraction of:
+      - draw number (numer losowania)
+      - date
+      - 6 numbers
+    Works even if draw/date are not always present (then returns None / "—").
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    records: List[Dict] = []
+
+    # Build an index of occurrences of 6-number lines
+    for idx, ln in enumerate(lines):
+        m = LINE_6NUM.search(ln)
+        if not m:
+            continue
+
+        nums = [int(m.group(i)) for i in range(1, 7)]
+        if not (all(NUM_MIN <= n <= NUM_MAX for n in nums) and len(set(nums)) == 6):
+            continue
+
+        # Search nearby lines (including current) for draw number & date
+        near = []
+        for j in range(max(0, idx - 5), min(len(lines), idx + 2)):
+            near.append(lines[j])
+
+        near_text = " | ".join(near)
+
+        # Date
+        date_str = None
+        dm = DATE_RE_1.search(near_text)
+        if dm:
+            date_str = dm.group(1)
+        else:
+            dm2 = DATE_RE_2.search(near_text)
+            if dm2:
+                date_str = dm2.group(1)
+
+        dt = _try_parse_date(date_str) if date_str else None
+        date_iso = dt.date().isoformat() if dt else ""
+
+        # Draw number (numer losowania) – best-effort:
+        # prefer numbers near words "los", "nr", "numer"
+        draw_no = None
+        # If there are tokens like "losowania 7318" etc.
+        draw_candidates = DRAWNO_RE.findall(near_text)
+        # Filter out obvious years like 2024/2025/2026 if present
+        filtered = []
+        for c in draw_candidates:
+            try:
+                val = int(c)
+            except Exception:
+                continue
+            if 1900 <= val <= 2100:
+                continue
+            filtered.append(val)
+
+        # Heuristic: choose the largest (draw numbers tend to be 4 digits and increasing)
+        if filtered:
+            draw_no = max(filtered)
+
+        records.append({
+            "draw_no": draw_no,
+            "date_str": date_str or "—",
+            "date_iso": date_iso,
+            "nums": sorted(nums),
+        })
+
+    # Try to sort by draw_no (desc) if we have many draw numbers, else keep found order
+    with_draw = [r for r in records if r["draw_no"] is not None]
+    if len(with_draw) >= max(5, int(len(records) * 0.4)):
+        records = sorted(records, key=lambda r: (r["draw_no"] is None, r["draw_no"] or -1), reverse=True)
+
+    return records
+
+@st.cache_data(show_spinner=False)
+def load_records_cached(pdf_bytes: bytes) -> List[Dict]:
+    """
+    Cached by pdf_bytes content.
     Tries PyMuPDF first (robust), then pypdf fallback.
     """
     _validate_pdf_bytes(pdf_bytes)
 
     last_err = None
 
-    # 1) PyMuPDF
     if HAS_PYMUPDF:
         try:
             text = _read_pdf_text_pymupdf(pdf_bytes)
-            draws = _extract_draws_from_text(text)
-            if draws:
-                return draws
+            recs = _extract_records_from_text(text)
+            if recs:
+                return recs
         except Exception as e:
             last_err = e
 
-    # 2) pypdf fallback
     if HAS_PYPDF:
         try:
             text = _read_pdf_text_pypdf(pdf_bytes)
-            draws = _extract_draws_from_text(text)
-            if draws:
-                return draws
+            recs = _extract_records_from_text(text)
+            if recs:
+                return recs
         except Exception as e:
             last_err = e
 
-    # If both engines failed or extracted nothing
     if last_err:
-        raise RuntimeError(f"Nie udało się odczytać PDF / wyciągnąć losowań. Ostatni błąd: {last_err}")
-    raise RuntimeError("Nie udało się wyciągnąć losowań z PDF (brak dopasowań 6 liczb 1–49).")
+        raise RuntimeError(f"Nie udało się odczytać PDF / wyciągnąć wyników. Ostatni błąd: {last_err}")
+    raise RuntimeError("Nie udało się wyciągnąć wyników z PDF (brak dopasowań 6 liczb 1–49).")
 
 
 # =========================================================
@@ -463,41 +538,34 @@ def pick_daily_set_from_hot(
 
 
 # =========================================================
-# EXPORT
+# EXPORT (TXT ONLY)
 # =========================================================
-def records_to_dataframe(records: List[Dict]) -> pd.DataFrame:
-    return pd.DataFrame({
-        "Typ": [r["Typ"] for r in records],
-        "Kupon": [" ".join(f"{x:02d}" for x in r["Kupon"]) for r in records],
-    })
+def make_txt_for_tickets(records: List[Dict]) -> bytes:
+    lines = []
+    for i, r in enumerate(records, start=1):
+        nums = " ".join(f"{x:02d}" for x in r["Kupon"])
+        lines.append(f"{i:03d}. [{r['Typ']}] {nums}")
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
-def make_zip_package(records: List[Dict], draws_count: int, hot: List[int], cold: List[int], settings: Dict) -> bytes:
-    df_out = records_to_dataframe(records)
-    csv_bytes = df_out.to_csv(index=False).encode("utf-8")
+def make_txt_for_results(result_records: List[Dict]) -> bytes:
+    lines = []
+    for r in result_records:
+        draw_no = r.get("draw_no")
+        draw_str = str(draw_no) if draw_no is not None else "—"
+        date_str = r.get("date_str") or "—"
+        nums = " ".join(f"{x:02d}" for x in r["nums"])
+        lines.append(f"Losowanie: {draw_str} | Data: {date_str} | Wynik: {nums}")
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
-    txt_lines = [
-        f"{i+1:03d}. [{records[i]['Typ']}] " + " ".join(f"{x:02d}" for x in records[i]["Kupon"])
-        for i in range(len(records))
-    ]
-    txt_bytes = ("\n".join(txt_lines)).encode("utf-8")
-
-    report = {
-        "pdf_file": PDF_FILENAME,
-        "draws_found": draws_count,
-        "hot": sorted(hot),
-        "cold": sorted(cold),
-        "settings": settings,
-        "pdf_engine": "pymupdf" if HAS_PYMUPDF else ("pypdf" if HAS_PYPDF else "none"),
-    }
-    report_bytes = (pd.Series(report).to_json(indent=2, force_ascii=False)).encode("utf-8")
-
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("kupony.csv", csv_bytes)
-        z.writestr("kupony.txt", txt_bytes)
-        z.writestr("raport.json", report_bytes)
-
-    return zip_buffer.getvalue()
+def sanitize_txt_filename(name: str) -> str:
+    name = (name or "").strip()
+    if not name:
+        name = "wyniki.txt"
+    # forbid paths
+    name = name.replace("\\", "_").replace("/", "_").replace("..", "_")
+    if not name.lower().endswith(".txt"):
+        name += ".txt"
+    return name
 
 
 # =========================================================
@@ -509,18 +577,23 @@ def main():
 
     st.title(APP_TITLE)
     st.write("Generator typowań Lotto na bazie historii losowań z pliku **wyniki.pdf** (1–49, typuje 6 liczb).")
-    st.caption("Stabilny na telefonach/tabletach/PC: cache, szybkie renderowanie, odporny odczyt PDF (PyMuPDF + fallback).")
+    st.caption("Płynny na telefonach/tabletach/PC: cache, szybkie renderowanie, odporny odczyt PDF (PyMuPDF + fallback).")
 
-    # Session caches: do not recompute on slider moves
+    # Session caches
     if "last_records" not in st.session_state:
         st.session_state["last_records"] = []
     if "last_settings" not in st.session_state:
         st.session_state["last_settings"] = {}
     if "last_daily" not in st.session_state:
         st.session_state["last_daily"] = None
+    if "show_results" not in st.session_state:
+        st.session_state["show_results"] = False
+    if "results_count" not in st.session_state:
+        st.session_state["results_count"] = 10
 
     pdf_path = Path(os.getcwd()) / PDF_FILENAME
 
+    # Sidebar settings
     with st.sidebar:
         st.header("⚙️ Ustawienia")
 
@@ -576,11 +649,12 @@ def main():
         st.subheader("⚡ Wydajność")
         preview_limit = st.slider("Ile kuponów pokazać w podglądzie (ładnie)", 10, 200, 60, 10)
 
-    # Load PDF bytes & parse draws (cached) — robust start
+    # Load PDF & parse records (cached)
     st.markdown('<div class="v-card">', unsafe_allow_html=True)
     st.subheader("📄 Dane wejściowe")
     st.write(f"Plik: `{pdf_path}`")
     st.write(f"Silnik PDF: **{'PyMuPDF (fitz)' if HAS_PYMUPDF else 'pypdf (fallback)'}**")
+    st.markdown('<div class="v-muted">Jeśli PDF nie zawiera dat / numerów losowań w tekście, pola mogą pokazać „—”.</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     if not pdf_path.exists():
@@ -589,27 +663,28 @@ def main():
 
     try:
         pdf_bytes = pdf_path.read_bytes()
-        draws = load_draws_cached(pdf_bytes)
+        result_records = load_records_cached(pdf_bytes)
     except Exception as e:
-        st.error("❌ Aplikacja nie mogła wczytać PDF albo wyciągnąć losowań.")
+        st.error("❌ Aplikacja nie mogła wczytać PDF albo wyciągnąć wyników.")
         st.code(str(e))
         st.stop()
 
-    if len(draws) == 0:
-        st.error("❌ Nie znaleziono losowań w PDF (6 liczb 1–49).")
+    if not result_records:
+        st.error("❌ Nie znaleziono wyników w PDF (6 liczb 1–49).")
         st.stop()
 
+    # Extract draws list for stats
+    draws = [r["nums"] for r in result_records]
     freq_df = compute_stats_cached(draws)
-
     hot, cold, _neutral = build_groups(freq_df, hot_size=hot_size, cold_size=cold_size)
 
-    # Layout
+    # Layout: stats + hot/cold
     left, right = st.columns([1.2, 0.8], gap="large")
 
     with left:
         st.markdown('<div class="v-card">', unsafe_allow_html=True)
         st.subheader("📊 Częstotliwość 1–49")
-        st.success(f"✅ Losowań w bazie: **{len(draws)}**")
+        st.success(f"✅ Wyników w bazie: **{len(result_records)}**")
         st.dataframe(freq_df, use_container_width=True, hide_index=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -622,7 +697,6 @@ def main():
 
         st.markdown("**Zimne (Cold)**")
         st.markdown(" ".join([f'<span class="v-pill">{n:02d}</span>' for n in sorted(cold)]), unsafe_allow_html=True)
-
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown('<div class="v-card">', unsafe_allow_html=True)
@@ -634,16 +708,23 @@ def main():
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
+
+    # Buttons: Generate / Daily / Show results
     st.markdown('<div class="v-card">', unsafe_allow_html=True)
     st.subheader("🎟️ Generator")
 
-    col_btn1, col_btn2 = st.columns(2, gap="large")
+    col_btn1, col_btn2, col_btn3 = st.columns(3, gap="large")
     with col_btn1:
         generate = st.button("🏆 GENERUJ KUPONY (6 liczb)", type="primary", use_container_width=True)
     with col_btn2:
         daily = st.button("🌿 TWOJE SZCZĘŚLIWE CYFRY DNIA", type="primary", use_container_width=True)
+    with col_btn3:
+        show_res = st.button("📋 POKAŻ WYNIKI", type="primary", use_container_width=True)
 
-    # Map UI mode to internal
+    if show_res:
+        st.session_state["show_results"] = not st.session_state["show_results"]
+
+    # Map mode
     if mode_ui == "Hybryda 70/20/10 (hot/cold/mix)":
         base_mode_kind = "hybrid"
     elif mode_ui == "Tylko 🔥 gorące":
@@ -663,7 +744,7 @@ def main():
             return {"Typ": "cold", "Kupon": gen_ticket("cold", hot, cold, mix_hot_count)}
         return {"Typ": "mix", "Kupon": gen_ticket("mix", hot, cold, mix_hot_count)}
 
-    # Generate tickets on click (store in session_state)
+    # Generate tickets
     if generate:
         progress = st.progress(0)
         status = st.empty()
@@ -719,7 +800,7 @@ def main():
             } if smart_enabled else {}
         }
 
-    # Daily on click (store in session_state)
+    # Daily numbers
     if daily:
         prefer_parity = parity_bias_from_last_n(draws, 10)
         prefer_level = high_low_bias_from_last_two(draws, threshold=24)
@@ -743,6 +824,43 @@ def main():
             "prefer_level": prefer_level,
             "target_spread": target_spread
         }
+
+    # NEW: show last results table (cached source => no lag)
+    if st.session_state["show_results"]:
+        st.markdown("### 📋 Ostatnie wyniki")
+
+        count_choice = st.selectbox(
+            "Ile ostatnich wyników pokazać?",
+            [10, 50, 100],
+            index=[10, 50, 100].index(st.session_state.get("results_count", 10))
+        )
+        st.session_state["results_count"] = int(count_choice)
+
+        # "last N" from current order (usually newest-first). If your PDF is oldest-first,
+        # change to: slice = result_records[-count_choice:][::-1]
+        slice_records = result_records[:int(count_choice)]
+
+        df_results = pd.DataFrame({
+            "Numer losowania": [r["draw_no"] if r["draw_no"] is not None else "—" for r in slice_records],
+            "Data": [r["date_str"] for r in slice_records],
+            "Wynik": [" ".join(f"{x:02d}" for x in r["nums"]) for r in slice_records],
+        })
+
+        st.dataframe(df_results, use_container_width=True, hide_index=True)
+
+        st.markdown('<div class="v-muted">Zapis jest dostępny wyłącznie jako plik TXT (przeglądarka zapisze go do folderu „Pobrane”).</div>', unsafe_allow_html=True)
+
+        filename_input = st.text_input("Nazwa pliku .txt (np. wyniki.txt)", value="wyniki.txt")
+        safe_name = sanitize_txt_filename(filename_input)
+
+        txt_bytes = make_txt_for_results(slice_records)
+        st.download_button(
+            "⬇️ Pobierz wyniki jako TXT",
+            data=txt_bytes,
+            file_name=safe_name,
+            mime="text/plain",
+            use_container_width=True
+        )
 
     # Render daily
     if st.session_state.get("last_daily") is not None:
@@ -777,25 +895,28 @@ def main():
         st.markdown(f"- Ostatnie 2 wyniki: trend niskie/wysokie → dziś: **{level_to_text(info['prefer_level'])}** (z puli hot).")
         st.markdown(f"- Średni rozstrzał (10 wyników): **{info['target_spread']:.1f}** → dobieram zestaw o podobnym rozstrzale.")
 
-    # Render generated tickets
+    # Render generated tickets + TXT export only
     records = st.session_state.get("last_records", [])
     if records:
         st.markdown("### 🎯 Wygenerowane kupony")
 
-        df_out = records_to_dataframe(records)
+        df_out = pd.DataFrame({
+            "Typ": [r["Typ"] for r in records],
+            "Kupon": [" ".join(f"{x:02d}" for x in r["Kupon"]) for r in records],
+        })
 
         preview_n = min(int(preview_limit), len(records))
         st.caption(f"Podgląd pierwszych **{preview_n}** kuponów (pełna lista w tabeli).")
 
         for i in range(preview_n):
-            nums = df_out.iloc[i]["Kupon"]
+            nums_str = df_out.iloc[i]["Kupon"]
             typ = df_out.iloc[i]["Typ"]
-            t = [int(x) for x in nums.split()]
+            t = [int(x) for x in nums_str.split()]
             ev, od = even_odd_split(t)
             pairs = count_adjacent_pairs(sorted(t))
             st.markdown(
                 f'<div class="v-row"><b>Kupon #{i+1:03d}</b> '
-                f'<span class="v-muted">[{typ}]</span> — {nums} '
+                f'<span class="v-muted">[{typ}]</span> — {nums_str} '
                 f'<span class="v-muted"> | parzyste/nieparzyste: {ev}/{od} | pary: {pairs}</span></div>',
                 unsafe_allow_html=True
             )
@@ -803,19 +924,18 @@ def main():
         st.markdown("#### Pełna tabela")
         st.dataframe(df_out, use_container_width=True, hide_index=True)
 
-        zip_bytes = make_zip_package(
-            records=records,
-            draws_count=len(draws),
-            hot=hot,
-            cold=cold,
-            settings=st.session_state.get("last_settings", {})
-        )
+        st.markdown('<div class="v-muted">Zapis kuponów jest dostępny wyłącznie jako TXT (pobieranie do „Pobrane”).</div>', unsafe_allow_html=True)
+
+        ticket_filename_input = st.text_input("Nazwa pliku kuponów .txt (np. kupony.txt)", value="kupony.txt")
+        safe_ticket_name = sanitize_txt_filename(ticket_filename_input)
+
+        txt_tickets = make_txt_for_tickets(records)
         st.download_button(
-            "⬇️ Pobierz paczkę (ZIP: kupony + raport)",
-            data=zip_bytes,
-            file_name="generator_victory_lotto_kupony.zip",
-            mime="application/zip",
-            use_container_width=True,
+            "⬇️ Pobierz kupony jako TXT",
+            data=txt_tickets,
+            file_name=safe_ticket_name,
+            mime="text/plain",
+            use_container_width=True
         )
 
     st.markdown("</div>", unsafe_allow_html=True)
