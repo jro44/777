@@ -9,8 +9,11 @@ from typing import List, Dict, Tuple, Optional
 import pandas as pd
 import streamlit as st
 
+# =========================================================
 # PDF engines:
-# PyMuPDF (fitz) is the fastest and most robust for Streamlit Cloud
+# PyMuPDF (fitz) is the fastest and most robust on Streamlit Cloud.
+# pypdf is a fallback.
+# =========================================================
 try:
     import fitz  # PyMuPDF
     HAS_PYMUPDF = True
@@ -162,16 +165,30 @@ div.stButton > button[kind="primary"]:hover{
 
 
 # =========================================================
-# PDF PARSING (Multipasko-like structure)
-# Key fix: numbers lines are at top; draw numbers are in a block later.
-# We pair by order.
+# PDF PARSING — FIXED FOR YOUR PDF FORMAT
+# Your PDF text extraction looks like:
+# Lotto 6/49
+# 04
+# 09 10
+# 28
+# 40
+# 48
+# ...
+# and then at the bottom:
+# 7320
+# 7319
+# 7318
+# ...
+#
+# So we:
+# 1) collect ALL numbers 1–49 in order until draw-number section starts (>=1000)
+# 2) group them by 6
+# 3) collect draw numbers (>=1000) in order
+# 4) pair by order (newest first)
 # =========================================================
 
-# Matches 6 numbers separated by spaces: "04 09 10 28 40 48"
-LINE_6NUM = re.compile(r"^\s*(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s*$")
-
-# Draw numbers in this dataset are 4 digits mostly (e.g. 7320), but let's allow 4-5 digits safely
-DRAWNO_LINE = re.compile(r"^\s*(\d{4,5})\s*$")
+DRAWNO_MIN = 1000  # anything above this treated as draw number (e.g., 7320)
+INT_RE = re.compile(r"\d+")
 
 def _validate_pdf_bytes(pdf_bytes: bytes) -> None:
     if not pdf_bytes.startswith(b"%PDF"):
@@ -207,70 +224,100 @@ def _read_pdf_pages_text_pypdf(pdf_bytes: bytes) -> List[str]:
             pages.append("")
     return pages
 
-def _is_valid_lotto_num(n: int) -> bool:
-    return NUM_MIN <= n <= NUM_MAX
+def _extract_tokens_and_drawnos_from_page(page_text: str) -> Tuple[List[int], List[int]]:
+    """
+    Returns:
+      - tokens (numbers 1..49) in order for this page
+      - draw numbers (>=1000) in order for this page
+    """
+    tokens: List[int] = []
+    drawnos: List[int] = []
 
-def _extract_numbers_and_drawnos_from_page(page_text: str) -> Tuple[List[List[int]], List[int]]:
-    """
-    Extract:
-      - list of 6-number draws (in order of appearance top->bottom)
-      - list of draw numbers (in order of appearance top->bottom)
-    """
     lines = [ln.strip() for ln in (page_text or "").splitlines() if ln.strip()]
-    found_draws: List[List[int]] = []
-    found_drawnos: List[int] = []
+    in_drawno_section = False
 
     for ln in lines:
-        # Ignore obvious header lines
+        # Skip header line that would add fake numbers: "Lotto 6/49" contains 6 and 49
         if "Lotto" in ln and "6/49" in ln:
             continue
-        if "multipasko" in ln.lower():
+
+        ints = [int(x) for x in INT_RE.findall(ln)]
+        if not ints:
             continue
 
-        m6 = LINE_6NUM.match(ln)
-        if m6:
-            nums = [int(m6.group(i)) for i in range(1, 7)]
-            if all(_is_valid_lotto_num(x) for x in nums) and len(set(nums)) == 6:
-                found_draws.append(sorted(nums))
-            continue
+        # Detect entering draw-number section
+        if any(x >= DRAWNO_MIN for x in ints):
+            in_drawno_section = True
 
-        md = DRAWNO_LINE.match(ln)
-        if md:
-            val = int(md.group(1))
-            # filter out years (just in case)
-            if 1900 <= val <= 2100:
+        if in_drawno_section:
+            for x in ints:
+                if x >= DRAWNO_MIN and x < 100000:
+                    drawnos.append(x)
+        else:
+            for x in ints:
+                if NUM_MIN <= x <= NUM_MAX:
+                    tokens.append(x)
+
+    return tokens, drawnos
+
+def _chunk_tokens_to_draws(tokens: List[int]) -> List[List[int]]:
+    """
+    Chunk sequential tokens into groups of 6.
+    Validates uniqueness.
+    """
+    if len(tokens) < 6:
+        return []
+
+    if len(tokens) % 6 != 0:
+        # Try to salvage by dropping a few tokens from the start (rare)
+        best = []
+        best_valid = -1
+        for offset in range(6):
+            t = tokens[offset:]
+            if len(t) < 6:
                 continue
-            found_drawnos.append(val)
+            cut = (len(t) // 6) * 6
+            t = t[:cut]
+            draws = []
+            valid = 0
+            for i in range(0, len(t), 6):
+                d = t[i:i+6]
+                if len(set(d)) == 6 and all(NUM_MIN <= n <= NUM_MAX for n in d):
+                    valid += 1
+                draws.append(sorted(d))
+            if valid > best_valid:
+                best_valid = valid
+                best = draws
+        return best
 
-    return found_draws, found_drawnos
+    draws = []
+    for i in range(0, len(tokens), 6):
+        d = tokens[i:i+6]
+        draws.append(sorted(d))
+    return draws
 
-def _pair_draws_with_drawnos(all_draws: List[List[int]], all_drawnos: List[int]) -> List[Dict]:
-    """
-    Pair by order: 1st draw line -> 1st draw number.
-    Your PDF is newest->oldest from top, and draw numbers blocks are also newest->oldest.
-    """
-    n = min(len(all_draws), len(all_drawnos))
+def _pair_draws_with_drawnos(draws: List[List[int]], drawnos: List[int]) -> List[Dict]:
+    n = min(len(draws), len(drawnos))
     records: List[Dict] = []
 
-    # Primary: pair for all available
     for i in range(n):
         records.append({
-            "draw_no": all_drawnos[i],
-            "date_str": "—",      # this PDF doesn't contain dates in text
+            "draw_no": drawnos[i],
+            "date_str": "—",   # your PDF doesn't include dates in extracted text
             "date_iso": "",
-            "nums": all_draws[i],
+            "nums": draws[i],
         })
 
-    # If there are extra draws without draw numbers (rare), still keep them
-    for j in range(n, len(all_draws)):
+    # If extra draws exist without draw number (rare), still include
+    for j in range(n, len(draws)):
         records.append({
             "draw_no": None,
             "date_str": "—",
             "date_iso": "",
-            "nums": all_draws[j],
+            "nums": draws[j],
         })
 
-    # Sort by draw_no descending when possible
+    # Keep newest first by draw number when possible
     with_no = [r for r in records if r["draw_no"] is not None]
     if len(with_no) > 10:
         records.sort(key=lambda r: (r["draw_no"] is None, r["draw_no"] or -1), reverse=True)
@@ -280,8 +327,8 @@ def _pair_draws_with_drawnos(all_draws: List[List[int]], all_drawnos: List[int])
 @st.cache_data(show_spinner=False)
 def load_records_cached(pdf_bytes: bytes) -> List[Dict]:
     """
-    Cached by pdf_bytes.
-    Reads pages, extracts 6-number lines and draw numbers, then pairs by order.
+    Cached by pdf bytes.
+    Fixed logic for your multipasko-like PDF structure.
     """
     _validate_pdf_bytes(pdf_bytes)
 
@@ -307,22 +354,19 @@ def load_records_cached(pdf_bytes: bytes) -> List[Dict]:
             raise RuntimeError(f"Nie udało się odczytać PDF. Ostatni błąd: {last_err}")
         raise RuntimeError("Nie udało się odczytać PDF.")
 
-    all_draws: List[List[int]] = []
+    all_tokens: List[int] = []
     all_drawnos: List[int] = []
 
     for ptxt in pages:
-        d, dn = _extract_numbers_and_drawnos_from_page(ptxt)
-        # IMPORTANT: preserve order as appears on page (top->bottom)
-        all_draws.extend(d)
-        all_drawnos.extend(dn)
+        tokens, drawnos = _extract_tokens_and_drawnos_from_page(ptxt)
+        all_tokens.extend(tokens)
+        all_drawnos.extend(drawnos)
 
-    if not all_draws:
-        raise RuntimeError("Nie znaleziono żadnych wierszy z 6 liczbami 1–49 w PDF.")
+    draws = _chunk_tokens_to_draws(all_tokens)
+    if not draws:
+        raise RuntimeError("Nie znaleziono żadnych wyników (tokenów 1–49) w PDF.")
 
-    # Pair them by order
-    records = _pair_draws_with_drawnos(all_draws, all_drawnos)
-
-    # sanity: first record should be newest (draw_no max)
+    records = _pair_draws_with_drawnos(draws, all_drawnos)
     return records
 
 
@@ -442,7 +486,6 @@ def generate_with_smart_filters(
 
 # =========================================================
 # "TWOJE SZCZĘŚLIWE CYFRY DNIA"
-# (simple, fast, only on hot pool)
 # =========================================================
 def flatten_last_n(draws: List[List[int]], n: int) -> List[int]:
     return [x for d in draws[:n] for x in d]
@@ -538,7 +581,7 @@ def pick_daily_set_from_hot(
 
 
 # =========================================================
-# EXPORT (TXT ONLY) — Streamlit downloads (saves to "Pobrane")
+# EXPORT (TXT ONLY)
 # =========================================================
 def sanitize_txt_filename(name: str) -> str:
     name = (name or "").strip()
@@ -576,21 +619,17 @@ def main():
 
     st.title(APP_TITLE)
     st.write("Generator typowań Lotto na bazie historii losowań z pliku **wyniki.pdf** (1–49, typuje 6 liczb).")
-    st.caption("Naprawiony parser dla multipasko: łączy wyniki z numerami losowań po kolejności (bez lagów: cache + szybkie PDF).")
+    st.caption("Parser naprawiony pod PDF multipasko: zbiera wszystkie liczby 1–49 w kolejności i dzieli je co 6, a numery losowań paruje po kolejności. Cache = brak lagów.")
 
-    # Session state init
     if "last_records" not in st.session_state:
         st.session_state["last_records"] = []
     if "last_daily" not in st.session_state:
         st.session_state["last_daily"] = None
     if "show_results" not in st.session_state:
         st.session_state["show_results"] = False
-    if "results_count" not in st.session_state:
-        st.session_state["results_count"] = 10
 
     pdf_path = Path(os.getcwd()) / PDF_FILENAME
 
-    # Sidebar
     with st.sidebar:
         st.header("⚙️ Ustawienia")
 
@@ -645,12 +684,12 @@ def main():
         st.divider()
         preview_limit = st.slider("Ile kuponów pokazać w podglądzie", 10, 200, 60, 10)
 
-    # Load PDF
+    # Input card
     st.markdown('<div class="v-card">', unsafe_allow_html=True)
     st.subheader("📄 Dane wejściowe")
     st.write(f"Plik: `{pdf_path}`")
     st.write(f"Silnik PDF: **{'PyMuPDF (fitz)' if HAS_PYMUPDF else 'pypdf (fallback)'}**")
-    st.markdown('<div class="v-muted">W Twoim PDF daty nie występują w tekście, więc pole „Data” jest „—”. Numer losowania jest parowany po kolejności.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="v-muted">Daty w tym PDF nie są w tekście, więc „Data” będzie „—”. Numery losowań są pobierane z bloku na dole i parowane po kolejności.</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     if not pdf_path.exists():
@@ -669,7 +708,6 @@ def main():
     freq_df = compute_stats_cached(draws)
     hot, cold, _neutral = build_groups(freq_df, hot_size=hot_size, cold_size=cold_size)
 
-    # UI panels
     left, right = st.columns([1.2, 0.8], gap="large")
 
     with left:
@@ -698,7 +736,6 @@ def main():
 
     st.divider()
 
-    # Buttons
     st.markdown('<div class="v-card">', unsafe_allow_html=True)
     st.subheader("🎟️ Generator")
 
@@ -713,7 +750,6 @@ def main():
     if show_res:
         st.session_state["show_results"] = not st.session_state["show_results"]
 
-    # Mode mapping
     if mode_ui == "Hybryda 70/20/10 (hot/cold/mix)":
         base_mode_kind = "hybrid"
     elif mode_ui == "Tylko 🔥 gorące":
@@ -733,7 +769,7 @@ def main():
             return {"Typ": "cold", "Kupon": gen_ticket("cold", hot, cold, mix_hot_count)}
         return {"Typ": "mix", "Kupon": gen_ticket("mix", hot, cold, mix_hot_count)}
 
-    # Generate tickets
+    # Generate
     if generate:
         progress = st.progress(0)
         status = st.empty()
@@ -799,21 +835,17 @@ def main():
             "target_spread": target_spread
         }
 
-    # Show last results
+    # Results table (10/50/100) + TXT export
     if st.session_state["show_results"]:
         st.markdown("### 📋 Ostatnie wyniki")
-
         count_choice = st.selectbox("Ile ostatnich wyników pokazać?", [10, 50, 100], index=0)
-        st.session_state["results_count"] = int(count_choice)
 
         slice_records = result_records[:int(count_choice)]
-
         df_results = pd.DataFrame({
             "Numer losowania": [r["draw_no"] if r["draw_no"] is not None else "—" for r in slice_records],
             "Data": [r["date_str"] for r in slice_records],
             "Wynik": [" ".join(f"{x:02d}" for x in r["nums"]) for r in slice_records],
         })
-
         st.dataframe(df_results, use_container_width=True, hide_index=True)
 
         st.markdown('<div class="v-muted">Zapis jest dostępny wyłącznie jako plik TXT (pobieranie → folder „Pobrane”).</div>', unsafe_allow_html=True)
@@ -862,11 +894,10 @@ def main():
         st.markdown(f"- Ostatnie 2 wyniki: trend niskie/wysokie → dziś: **{level_to_text(info['prefer_level'])}** (z puli hot).")
         st.markdown(f"- Średni rozstrzał (10 wyników): **{info['target_spread']:.1f}** → dobieram zestaw o podobnym rozstrzale.")
 
-    # Render generated tickets + TXT export
+    # Render tickets + TXT export
     records = st.session_state.get("last_records", [])
     if records:
         st.markdown("### 🎯 Wygenerowane kupony")
-
         df_out = pd.DataFrame({
             "Typ": [r["Typ"] for r in records],
             "Kupon": [" ".join(f"{x:02d}" for x in r["Kupon"]) for r in records],
@@ -906,16 +937,16 @@ def main():
 
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # Quick verification (should match official app top results)
+    with st.expander("✅ Kontrola (pierwsze 3 rekordy z PDF — powinny być najnowsze)"):
+        for i, r in enumerate(result_records[:3], start=1):
+            st.write(f"{i}. Losowanie: {r['draw_no']} | Wynik: {' '.join(f'{x:02d}' for x in r['nums'])} | Data: {r['date_str']}")
+
     with st.expander("📌 Diagnostyka (TOP/LOW)"):
         st.write("TOP 15 najczęstszych liczb:")
         st.dataframe(freq_df.head(15), use_container_width=True, hide_index=True)
         st.write("LOW 15 najrzadszych liczb:")
         st.dataframe(freq_df.tail(15).sort_values(["Wystąpienia", "Liczba"]), use_container_width=True, hide_index=True)
-
-    # Quick sanity: show first 3 records to confirm newest order
-    with st.expander("✅ Szybka kontrola (pierwsze 3 rekordy z PDF)"):
-        for i, r in enumerate(result_records[:3], start=1):
-            st.write(f"{i}. Losowanie: {r['draw_no']} | Wynik: {' '.join(f'{x:02d}' for x in r['nums'])} | Data: {r['date_str']}")
 
 if __name__ == "__main__":
     main()
