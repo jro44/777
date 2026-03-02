@@ -38,6 +38,12 @@ PDF_FILENAME = "wyniki.pdf"
 NUM_MIN = 1
 NUM_MAX = 49
 PICK_COUNT = 6
+DRAWNO_MIN = 1000  # anything above treated as draw number
+
+# Defaults for hot/cold proportions in hybrid mode
+HYBRID_HOT_P = 0.70
+HYBRID_COLD_P = 0.20
+HYBRID_MIX_P = 0.10
 
 
 # =========================================================
@@ -166,28 +172,7 @@ div.stButton > button[kind="primary"]:hover{
 
 # =========================================================
 # PDF PARSING — FIXED FOR YOUR PDF FORMAT
-# Your PDF text extraction looks like:
-# Lotto 6/49
-# 04
-# 09 10
-# 28
-# 40
-# 48
-# ...
-# and then at the bottom:
-# 7320
-# 7319
-# 7318
-# ...
-#
-# So we:
-# 1) collect ALL numbers 1–49 in order until draw-number section starts (>=1000)
-# 2) group them by 6
-# 3) collect draw numbers (>=1000) in order
-# 4) pair by order (newest first)
 # =========================================================
-
-DRAWNO_MIN = 1000  # anything above this treated as draw number (e.g., 7320)
 INT_RE = re.compile(r"\d+")
 
 def _validate_pdf_bytes(pdf_bytes: bytes) -> None:
@@ -225,11 +210,6 @@ def _read_pdf_pages_text_pypdf(pdf_bytes: bytes) -> List[str]:
     return pages
 
 def _extract_tokens_and_drawnos_from_page(page_text: str) -> Tuple[List[int], List[int]]:
-    """
-    Returns:
-      - tokens (numbers 1..49) in order for this page
-      - draw numbers (>=1000) in order for this page
-    """
     tokens: List[int] = []
     drawnos: List[int] = []
 
@@ -237,7 +217,7 @@ def _extract_tokens_and_drawnos_from_page(page_text: str) -> Tuple[List[int], Li
     in_drawno_section = False
 
     for ln in lines:
-        # Skip header line that would add fake numbers: "Lotto 6/49" contains 6 and 49
+        # skip header like "Lotto 6/49" which would inject 6 and 49
         if "Lotto" in ln and "6/49" in ln:
             continue
 
@@ -245,13 +225,12 @@ def _extract_tokens_and_drawnos_from_page(page_text: str) -> Tuple[List[int], Li
         if not ints:
             continue
 
-        # Detect entering draw-number section
         if any(x >= DRAWNO_MIN for x in ints):
             in_drawno_section = True
 
         if in_drawno_section:
             for x in ints:
-                if x >= DRAWNO_MIN and x < 100000:
+                if DRAWNO_MIN <= x < 100000:
                     drawnos.append(x)
         else:
             for x in ints:
@@ -261,40 +240,37 @@ def _extract_tokens_and_drawnos_from_page(page_text: str) -> Tuple[List[int], Li
     return tokens, drawnos
 
 def _chunk_tokens_to_draws(tokens: List[int]) -> List[List[int]]:
-    """
-    Chunk sequential tokens into groups of 6.
-    Validates uniqueness.
-    """
-    if len(tokens) < 6:
+    if len(tokens) < PICK_COUNT:
         return []
 
-    if len(tokens) % 6 != 0:
-        # Try to salvage by dropping a few tokens from the start (rare)
-        best = []
-        best_valid = -1
-        for offset in range(6):
-            t = tokens[offset:]
-            if len(t) < 6:
-                continue
-            cut = (len(t) // 6) * 6
-            t = t[:cut]
-            draws = []
-            valid = 0
-            for i in range(0, len(t), 6):
-                d = t[i:i+6]
-                if len(set(d)) == 6 and all(NUM_MIN <= n <= NUM_MAX for n in d):
-                    valid += 1
-                draws.append(sorted(d))
-            if valid > best_valid:
-                best_valid = valid
-                best = draws
-        return best
+    # Try exact chunking
+    if len(tokens) % PICK_COUNT == 0:
+        draws = []
+        for i in range(0, len(tokens), PICK_COUNT):
+            d = tokens[i:i+PICK_COUNT]
+            draws.append(sorted(d))
+        return draws
 
-    draws = []
-    for i in range(0, len(tokens), 6):
-        d = tokens[i:i+6]
-        draws.append(sorted(d))
-    return draws
+    # Salvage if not divisible by 6 (rare)
+    best = []
+    best_valid = -1
+    for offset in range(PICK_COUNT):
+        t = tokens[offset:]
+        if len(t) < PICK_COUNT:
+            continue
+        cut = (len(t) // PICK_COUNT) * PICK_COUNT
+        t = t[:cut]
+        draws = []
+        valid = 0
+        for i in range(0, len(t), PICK_COUNT):
+            d = t[i:i+PICK_COUNT]
+            if len(set(d)) == PICK_COUNT and all(NUM_MIN <= n <= NUM_MAX for n in d):
+                valid += 1
+            draws.append(sorted(d))
+        if valid > best_valid:
+            best_valid = valid
+            best = draws
+    return best
 
 def _pair_draws_with_drawnos(draws: List[List[int]], drawnos: List[int]) -> List[Dict]:
     n = min(len(draws), len(drawnos))
@@ -303,12 +279,12 @@ def _pair_draws_with_drawnos(draws: List[List[int]], drawnos: List[int]) -> List
     for i in range(n):
         records.append({
             "draw_no": drawnos[i],
-            "date_str": "—",   # your PDF doesn't include dates in extracted text
+            "date_str": "—",
             "date_iso": "",
             "nums": draws[i],
         })
 
-    # If extra draws exist without draw number (rare), still include
+    # Keep extra draws if any (no draw number)
     for j in range(n, len(draws)):
         records.append({
             "draw_no": None,
@@ -317,7 +293,7 @@ def _pair_draws_with_drawnos(draws: List[List[int]], drawnos: List[int]) -> List
             "nums": draws[j],
         })
 
-    # Keep newest first by draw number when possible
+    # Sort newest first by draw_no when possible
     with_no = [r for r in records if r["draw_no"] is not None]
     if len(with_no) > 10:
         records.sort(key=lambda r: (r["draw_no"] is None, r["draw_no"] or -1), reverse=True)
@@ -326,10 +302,6 @@ def _pair_draws_with_drawnos(draws: List[List[int]], drawnos: List[int]) -> List
 
 @st.cache_data(show_spinner=False)
 def load_records_cached(pdf_bytes: bytes) -> List[Dict]:
-    """
-    Cached by pdf bytes.
-    Fixed logic for your multipasko-like PDF structure.
-    """
     _validate_pdf_bytes(pdf_bytes)
 
     last_err = None
@@ -374,14 +346,14 @@ def load_records_cached(pdf_bytes: bytes) -> List[Dict]:
 # STATS & GROUPS (cached)
 # =========================================================
 @st.cache_data(show_spinner=False)
-def compute_stats_cached(draws: List[List[int]]) -> pd.DataFrame:
+def compute_freq_df_cached(draws: List[List[int]]) -> pd.DataFrame:
     flat = [n for d in draws for n in d]
     c = Counter(flat)
     rows = [{"Liczba": n, "Wystąpienia": c.get(n, 0)} for n in range(NUM_MIN, NUM_MAX + 1)]
     df = pd.DataFrame(rows).sort_values(["Wystąpienia", "Liczba"], ascending=[False, True]).reset_index(drop=True)
     return df
 
-def build_groups(freq_df: pd.DataFrame, hot_size: int, cold_size: int) -> Tuple[List[int], List[int], List[int]]:
+def build_groups_from_freq(freq_df: pd.DataFrame, hot_size: int, cold_size: int) -> Tuple[List[int], List[int], List[int]]:
     hot = freq_df.head(hot_size)["Liczba"].tolist()
     cold = freq_df.tail(cold_size)["Liczba"].tolist()
     neutral = [n for n in range(NUM_MIN, NUM_MAX + 1) if n not in hot and n not in cold]
@@ -389,7 +361,7 @@ def build_groups(freq_df: pd.DataFrame, hot_size: int, cold_size: int) -> Tuple[
 
 
 # =========================================================
-# GENERATION
+# GENERATION (always based on TRUE draws -> freq -> hot/cold)
 # =========================================================
 def pick_unique(pool: List[int], k: int) -> List[int]:
     pool = list(dict.fromkeys(pool))
@@ -619,8 +591,9 @@ def main():
 
     st.title(APP_TITLE)
     st.write("Generator typowań Lotto na bazie historii losowań z pliku **wyniki.pdf** (1–49, typuje 6 liczb).")
-    st.caption("Parser naprawiony pod PDF multipasko: zbiera wszystkie liczby 1–49 w kolejności i dzieli je co 6, a numery losowań paruje po kolejności. Cache = brak lagów.")
+    st.caption("Hot/Cold są wyliczane wyłącznie z prawdziwych wyników z PDF (częstotliwości). Cache = płynność.")
 
+    # Session init
     if "last_records" not in st.session_state:
         st.session_state["last_records"] = []
     if "last_daily" not in st.session_state:
@@ -630,6 +603,7 @@ def main():
 
     pdf_path = Path(os.getcwd()) / PDF_FILENAME
 
+    # Sidebar
     with st.sidebar:
         st.header("⚙️ Ustawienia")
 
@@ -645,6 +619,14 @@ def main():
         )
 
         st.divider()
+
+        # NEW: User can choose how many latest draws to use to compute HOT/COLD (based on TRUE results)
+        history_window = st.selectbox(
+            "Ile ostatnich losowań brać do analizy HOT/COLD?",
+            [50, 100, 250, 500, 999],
+            index=4
+        )
+
         n_tickets = st.slider("Liczba kuponów", 1, 500, 50, 1)
 
         st.divider()
@@ -689,7 +671,7 @@ def main():
     st.subheader("📄 Dane wejściowe")
     st.write(f"Plik: `{pdf_path}`")
     st.write(f"Silnik PDF: **{'PyMuPDF (fitz)' if HAS_PYMUPDF else 'pypdf (fallback)'}**")
-    st.markdown('<div class="v-muted">Daty w tym PDF nie są w tekście, więc „Data” będzie „—”. Numery losowań są pobierane z bloku na dole i parowane po kolejności.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="v-muted">HOT/COLD liczone są z prawdziwych wyników. Możesz ograniczyć analizę do np. ostatnich 100/250/999 losowań (w sidebarze).</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     if not pdf_path.exists():
@@ -698,31 +680,36 @@ def main():
 
     try:
         pdf_bytes = pdf_path.read_bytes()
-        result_records = load_records_cached(pdf_bytes)
+        result_records_all = load_records_cached(pdf_bytes)
     except Exception as e:
         st.error("❌ Aplikacja nie mogła wczytać PDF albo wyciągnąć wyników.")
         st.code(str(e))
         st.stop()
 
+    # Limit to last N draws for analysis
+    history_window = int(history_window)
+    result_records = result_records_all[:history_window]
     draws = [r["nums"] for r in result_records]
-    freq_df = compute_stats_cached(draws)
-    hot, cold, _neutral = build_groups(freq_df, hot_size=hot_size, cold_size=cold_size)
+
+    # Frequency from TRUE results in chosen window
+    freq_df = compute_freq_df_cached(draws)
+    hot, cold, _neutral = build_groups_from_freq(freq_df, hot_size=hot_size, cold_size=cold_size)
 
     left, right = st.columns([1.2, 0.8], gap="large")
 
     with left:
         st.markdown('<div class="v-card">', unsafe_allow_html=True)
-        st.subheader("📊 Częstotliwość 1–49")
-        st.success(f"✅ Wyników w bazie: **{len(result_records)}**")
+        st.subheader("📊 Częstotliwość 1–49 (z prawdziwych wyników)")
+        st.success(f"✅ Analizowane losowania: **{len(result_records)}** (z {len(result_records_all)} w PDF)")
         st.dataframe(freq_df, use_container_width=True, hide_index=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right:
         st.markdown('<div class="v-card">', unsafe_allow_html=True)
-        st.subheader("🔥 Gorące / ❄️ Zimne")
-        st.markdown("**Gorące (Hot)**")
+        st.subheader("🔥 Gorące / ❄️ Zimne (z wybranej historii)")
+        st.markdown("**Gorące (Hot) — najczęściej losowane**")
         st.markdown(" ".join([f'<span class="v-pill">{n:02d}</span>' for n in sorted(hot)]), unsafe_allow_html=True)
-        st.markdown("**Zimne (Cold)**")
+        st.markdown("**Zimne (Cold) — najrzadziej losowane**")
         st.markdown(" ".join([f'<span class="v-pill">{n:02d}</span>' for n in sorted(cold)]), unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -737,7 +724,7 @@ def main():
     st.divider()
 
     st.markdown('<div class="v-card">', unsafe_allow_html=True)
-    st.subheader("🎟️ Generator")
+    st.subheader("🎟️ Generator (losowanie z HOT/COLD wyliczonych z prawdziwych wyników)")
 
     col_btn1, col_btn2, col_btn3 = st.columns(3, gap="large")
     with col_btn1:
@@ -750,6 +737,7 @@ def main():
     if show_res:
         st.session_state["show_results"] = not st.session_state["show_results"]
 
+    # Mode mapping
     if mode_ui == "Hybryda 70/20/10 (hot/cold/mix)":
         base_mode_kind = "hybrid"
     elif mode_ui == "Tylko 🔥 gorące":
@@ -761,7 +749,7 @@ def main():
 
     def gen_one_record() -> Dict:
         if base_mode_kind == "hybrid":
-            chosen = random.choices(["hot", "cold", "mix"], weights=[0.70, 0.20, 0.10], k=1)[0]
+            chosen = random.choices(["hot", "cold", "mix"], weights=[HYBRID_HOT_P, HYBRID_COLD_P, HYBRID_MIX_P], k=1)[0]
             return {"Typ": chosen, "Kupon": gen_ticket(chosen, hot, cold, mix_hot_count)}
         if base_mode_kind == "hot":
             return {"Typ": "hot", "Kupon": gen_ticket("hot", hot, cold, mix_hot_count)}
@@ -769,7 +757,7 @@ def main():
             return {"Typ": "cold", "Kupon": gen_ticket("cold", hot, cold, mix_hot_count)}
         return {"Typ": "mix", "Kupon": gen_ticket("mix", hot, cold, mix_hot_count)}
 
-    # Generate
+    # Generate tickets
     if generate:
         progress = st.progress(0)
         status = st.empty()
@@ -810,7 +798,7 @@ def main():
 
         st.session_state["last_records"] = recs
 
-    # Daily numbers
+    # Daily numbers (based on last N results from chosen window)
     if daily:
         prefer_parity = parity_bias_from_last_n(draws, 10)
         prefer_level = high_low_bias_from_last_two(draws, threshold=24)
@@ -835,12 +823,12 @@ def main():
             "target_spread": target_spread
         }
 
-    # Results table (10/50/100) + TXT export
+    # Show last results (from full PDF, newest first)
     if st.session_state["show_results"]:
-        st.markdown("### 📋 Ostatnie wyniki")
+        st.markdown("### 📋 Ostatnie wyniki (z PDF)")
         count_choice = st.selectbox("Ile ostatnich wyników pokazać?", [10, 50, 100], index=0)
 
-        slice_records = result_records[:int(count_choice)]
+        slice_records = result_records_all[:int(count_choice)]
         df_results = pd.DataFrame({
             "Numer losowania": [r["draw_no"] if r["draw_no"] is not None else "—" for r in slice_records],
             "Data": [r["date_str"] for r in slice_records],
@@ -861,7 +849,7 @@ def main():
             use_container_width=True
         )
 
-    # Render daily
+    # Render daily info
     if st.session_state.get("last_daily") is not None:
         info = st.session_state["last_daily"]
         daily_set = info["set"]
@@ -883,7 +871,7 @@ def main():
                 return "wyższe"
             return "dowolnie"
 
-        st.markdown("### 🌿 Twoje szczęśliwe cyfry dnia")
+        st.markdown("### 🌿 Twoje szczęśliwe cyfry dnia (z HOT na bazie prawdziwych wyników)")
         st.markdown(
             f'<div class="v-row"><b>Zestaw dnia</b> — {nums} '
             f'<span class="v-muted"> | parzyste/nieparzyste: {ev}/{od} | pary: {pairs}</span></div>',
@@ -894,10 +882,10 @@ def main():
         st.markdown(f"- Ostatnie 2 wyniki: trend niskie/wysokie → dziś: **{level_to_text(info['prefer_level'])}** (z puli hot).")
         st.markdown(f"- Średni rozstrzał (10 wyników): **{info['target_spread']:.1f}** → dobieram zestaw o podobnym rozstrzale.")
 
-    # Render tickets + TXT export
+    # Render generated tickets + TXT export
     records = st.session_state.get("last_records", [])
     if records:
-        st.markdown("### 🎯 Wygenerowane kupony")
+        st.markdown("### 🎯 Wygenerowane kupony (losowane z HOT/COLD wg prawdziwych wyników)")
         df_out = pd.DataFrame({
             "Typ": [r["Typ"] for r in records],
             "Kupon": [" ".join(f"{x:02d}" for x in r["Kupon"]) for r in records],
@@ -937,9 +925,8 @@ def main():
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Quick verification (should match official app top results)
     with st.expander("✅ Kontrola (pierwsze 3 rekordy z PDF — powinny być najnowsze)"):
-        for i, r in enumerate(result_records[:3], start=1):
+        for i, r in enumerate(result_records_all[:3], start=1):
             st.write(f"{i}. Losowanie: {r['draw_no']} | Wynik: {' '.join(f'{x:02d}' for x in r['nums'])} | Data: {r['date_str']}")
 
     with st.expander("📌 Diagnostyka (TOP/LOW)"):
@@ -947,6 +934,7 @@ def main():
         st.dataframe(freq_df.head(15), use_container_width=True, hide_index=True)
         st.write("LOW 15 najrzadszych liczb:")
         st.dataframe(freq_df.tail(15).sort_values(["Wystąpienia", "Liczba"]), use_container_width=True, hide_index=True)
+
 
 if __name__ == "__main__":
     main()
