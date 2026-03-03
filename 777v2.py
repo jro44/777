@@ -10,9 +10,7 @@ import pandas as pd
 import streamlit as st
 
 # =========================================================
-# PDF engines:
-# PyMuPDF (fitz) is the fastest and most robust on Streamlit Cloud.
-# pypdf is a fallback.
+# PDF engines
 # =========================================================
 try:
     import fitz  # PyMuPDF
@@ -38,16 +36,16 @@ PDF_FILENAME = "wyniki.pdf"
 NUM_MIN = 1
 NUM_MAX = 49
 PICK_COUNT = 6
-DRAWNO_MIN = 1000  # anything above treated as draw number
+DRAWNO_MIN = 1000
 
-# Defaults for hot/cold proportions in hybrid mode
 HYBRID_HOT_P = 0.70
 HYBRID_COLD_P = 0.20
 HYBRID_MIX_P = 0.10
 
 
 # =========================================================
-# UI STYLE (LIGHT BACKGROUND + GREEN ACCENTS + BLACK TEXT)
+# UI STYLE (light + green accents + black text)
+# + Force visible sidebar button (Streamlit sometimes hides it)
 # =========================================================
 LIGHT_GREEN_CSS = """
 <style>
@@ -85,17 +83,13 @@ LIGHT_GREEN_CSS = """
   color: var(--txt) !important;
   letter-spacing: .35px;
 }
+
 [data-testid="stAppViewContainer"] h1{
   font-family: ui-serif, Georgia, "Times New Roman", serif;
   text-transform: uppercase;
 }
 
-.block-container{
-  padding-top: 2.0rem;
-  padding-bottom: 2.5rem;
-  max-width: 1100px;
-}
-
+/* cards */
 .v-card{
   background: linear-gradient(180deg, var(--card), var(--card2));
   border: 1px solid var(--border);
@@ -121,32 +115,6 @@ LIGHT_GREEN_CSS = """
   color: var(--mut) !important;
 }
 
-section[data-testid="stSidebar"]{
-  background: linear-gradient(180deg, rgba(0, 194, 122, 0.08) 0%, rgba(255,255,255,0.85) 100%) !important;
-  border-right: 1px solid rgba(0, 168, 107, 0.16);
-}
-
-div[data-baseweb="select"] > div,
-div[data-baseweb="input"] > div,
-div[data-baseweb="textarea"] > div{
-  border-radius: 14px !important;
-}
-
-div.stButton > button[kind="primary"]{
-  background: linear-gradient(90deg, var(--green) 0%, var(--green2) 100%) !important;
-  color: #000000 !important;
-  border: 0 !important;
-  border-radius: 14px !important;
-  padding: 0.80rem 1.10rem !important;
-  font-weight: 1000 !important;
-  letter-spacing: .6px !important;
-  box-shadow: 0 10px 22px rgba(0, 168, 107, 0.18) !important;
-}
-div.stButton > button[kind="primary"]:hover{
-  filter: brightness(1.03);
-  transform: translateY(-1px);
-}
-
 .v-row{
   background: rgba(0, 168, 107, 0.06);
   border: 1px solid rgba(0, 168, 107, 0.18);
@@ -162,8 +130,37 @@ div.stButton > button[kind="primary"]:hover{
   border: 1px solid rgba(0, 168, 107, 0.22) !important;
 }
 
+/* nicer inputs */
+div[data-baseweb="select"] > div,
+div[data-baseweb="input"] > div,
+div[data-baseweb="textarea"] > div{
+  border-radius: 14px !important;
+}
+
+/* primary buttons */
+div.stButton > button[kind="primary"]{
+  background: linear-gradient(90deg, var(--green) 0%, var(--green2) 100%) !important;
+  color: #000000 !important;
+  border: 0 !important;
+  border-radius: 14px !important;
+  padding: 0.80rem 1.10rem !important;
+  font-weight: 1000 !important;
+  letter-spacing: .6px !important;
+  box-shadow: 0 10px 22px rgba(0, 168, 107, 0.18) !important;
+}
+
+div.stButton > button[kind="primary"]:hover{
+  filter: brightness(1.03);
+  transform: translateY(-1px);
+}
+
+/* Ensure sidebar toggle is not transparent / hidden */
+button[kind="header"]{
+  opacity: 1 !important;
+  visibility: visible !important;
+}
+
 @media (max-width: 640px){
-  .block-container{ padding-left: 1rem; padding-right: 1rem; }
   div.stButton > button[kind="primary"]{ width: 100% !important; }
 }
 </style>
@@ -171,7 +168,7 @@ div.stButton > button[kind="primary"]:hover{
 
 
 # =========================================================
-# PDF PARSING — FIXED FOR YOUR PDF FORMAT
+# PDF PARSING — fixed for your PDF
 # =========================================================
 INT_RE = re.compile(r"\d+")
 
@@ -217,7 +214,6 @@ def _extract_tokens_and_drawnos_from_page(page_text: str) -> Tuple[List[int], Li
     in_drawno_section = False
 
     for ln in lines:
-        # skip header like "Lotto 6/49" which would inject 6 and 49
         if "Lotto" in ln and "6/49" in ln:
             continue
 
@@ -243,7 +239,6 @@ def _chunk_tokens_to_draws(tokens: List[int]) -> List[List[int]]:
     if len(tokens) < PICK_COUNT:
         return []
 
-    # Try exact chunking
     if len(tokens) % PICK_COUNT == 0:
         draws = []
         for i in range(0, len(tokens), PICK_COUNT):
@@ -251,7 +246,6 @@ def _chunk_tokens_to_draws(tokens: List[int]) -> List[List[int]]:
             draws.append(sorted(d))
         return draws
 
-    # Salvage if not divisible by 6 (rare)
     best = []
     best_valid = -1
     for offset in range(PICK_COUNT):
@@ -284,7 +278,6 @@ def _pair_draws_with_drawnos(draws: List[List[int]], drawnos: List[int]) -> List
             "nums": draws[i],
         })
 
-    # Keep extra draws if any (no draw number)
     for j in range(n, len(draws)):
         records.append({
             "draw_no": None,
@@ -293,7 +286,6 @@ def _pair_draws_with_drawnos(draws: List[List[int]], drawnos: List[int]) -> List
             "nums": draws[j],
         })
 
-    # Sort newest first by draw_no when possible
     with_no = [r for r in records if r["draw_no"] is not None]
     if len(with_no) > 10:
         records.sort(key=lambda r: (r["draw_no"] is None, r["draw_no"] or -1), reverse=True)
@@ -338,8 +330,7 @@ def load_records_cached(pdf_bytes: bytes) -> List[Dict]:
     if not draws:
         raise RuntimeError("Nie znaleziono żadnych wyników (tokenów 1–49) w PDF.")
 
-    records = _pair_draws_with_drawnos(draws, all_drawnos)
-    return records
+    return _pair_draws_with_drawnos(draws, all_drawnos)
 
 
 # =========================================================
@@ -361,7 +352,7 @@ def build_groups_from_freq(freq_df: pd.DataFrame, hot_size: int, cold_size: int)
 
 
 # =========================================================
-# GENERATION (always based on TRUE draws -> freq -> hot/cold)
+# GENERATION
 # =========================================================
 def pick_unique(pool: List[int], k: int) -> List[int]:
     pool = list(dict.fromkeys(pool))
@@ -457,7 +448,7 @@ def generate_with_smart_filters(
 
 
 # =========================================================
-# "TWOJE SZCZĘŚLIWE CYFRY DNIA"
+# DAILY NUMBERS
 # =========================================================
 def flatten_last_n(draws: List[List[int]], n: int) -> List[int]:
     return [x for d in draws[:n] for x in d]
@@ -553,7 +544,7 @@ def pick_daily_set_from_hot(
 
 
 # =========================================================
-# EXPORT (TXT ONLY)
+# EXPORT (TXT)
 # =========================================================
 def sanitize_txt_filename(name: str) -> str:
     name = (name or "").strip()
@@ -576,24 +567,111 @@ def make_txt_for_results(result_records: List[Dict]) -> bytes:
     for r in result_records:
         draw_no = r.get("draw_no")
         draw_str = str(draw_no) if draw_no is not None else "—"
-        date_str = r.get("date_str") or "—"
         nums = " ".join(f"{x:02d}" for x in r["nums"])
-        lines.append(f"Losowanie: {draw_str} | Data: {date_str} | Wynik: {nums}")
+        lines.append(f"Losowanie: {draw_str} | Wynik: {nums}")
     return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+# =========================================================
+# SETTINGS UI (MAIN VIEW) — works on desktop + mobile
+# =========================================================
+def settings_panel(defaults: Dict) -> Dict:
+    """
+    Always visible settings panel (in main page).
+    Returns a dict of settings.
+    """
+    st.markdown('<div class="v-card">', unsafe_allow_html=True)
+    st.subheader("⚙️ Ustawienia (panel główny — działa na komputerze i telefonie)")
+
+    mode_ui = st.selectbox(
+        "Tryb typowania",
+        [
+            "Hybryda 70/20/10 (hot/cold/mix)",
+            "Tylko 🔥 gorące",
+            "Tylko ❄️ zimne",
+            "Tylko ⚗️ mix (hot+zimne)",
+        ],
+        index=defaults.get("mode_index", 0)
+    )
+
+    history_window = st.selectbox(
+        "Ile ostatnich losowań brać do analizy HOT/COLD?",
+        [50, 100, 250, 500, 999],
+        index=defaults.get("hist_index", 4)
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        n_tickets = st.slider("Liczba kuponów", 1, 500, defaults.get("n_tickets", 50), 1)
+        hot_size = st.slider("Ile liczb w grupie Gorących", 6, 35, defaults.get("hot_size", 20), 1)
+    with c2:
+        preview_limit = st.slider("Ile kuponów pokazać w podglądzie", 10, 200, defaults.get("preview_limit", 60), 10)
+        cold_size = st.slider("Ile liczb w grupie Zimnych", 6, 35, defaults.get("cold_size", 20), 1)
+
+    mix_hot_count = st.slider("MIX: ile liczb z gorących?", 1, 5, defaults.get("mix_hot_count", 3), 1)
+
+    st.markdown("---")
+    st.subheader("🧠 Tryb inteligentny (opcjonalny)")
+    smart_enabled = st.checkbox("Włącz tryb inteligentny", value=defaults.get("smart_enabled", False))
+
+    if smart_enabled:
+        block_run_2 = st.checkbox("Blokuj układy 1–2 (kolejne liczby)", value=defaults.get("block_run_2", True))
+        block_run_3 = st.checkbox("Blokuj układy 1–3 (ciąg 3 kolejnych)", value=defaults.get("block_run_3", True))
+
+        limit_pairs_on = st.checkbox("Włącz limit par (kolejne liczby)", value=defaults.get("limit_pairs_on", True))
+        max_adj_pairs = None
+        if limit_pairs_on:
+            max_adj_pairs = st.slider("Maks. liczba par kolejnych", 0, 5, defaults.get("max_adj_pairs", 2), 1)
+
+        even_odd_choice = st.radio(
+            "Parzyste / Nieparzyste (6 liczb)",
+            ["Dowolnie", "3/3", "4/2", "2/4", "5/1", "1/5", "6/0", "0/6"],
+            index=defaults.get("even_odd_idx", 0)
+        )
+
+        max_attempts_per_ticket = st.slider("Limit prób na kupon", 10, 500, defaults.get("max_attempts", 120), 10)
+    else:
+        block_run_2 = False
+        block_run_3 = False
+        max_adj_pairs = None
+        even_odd_choice = "Dowolnie"
+        max_attempts_per_ticket = 120
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    return {
+        "mode_ui": mode_ui,
+        "history_window": int(history_window),
+        "n_tickets": int(n_tickets),
+        "hot_size": int(hot_size),
+        "cold_size": int(cold_size),
+        "mix_hot_count": int(mix_hot_count),
+        "preview_limit": int(preview_limit),
+        "smart_enabled": bool(smart_enabled),
+        "block_run_2": bool(block_run_2),
+        "block_run_3": bool(block_run_3),
+        "max_adj_pairs": max_adj_pairs,
+        "even_odd_choice": even_odd_choice,
+        "max_attempts_per_ticket": int(max_attempts_per_ticket),
+    }
 
 
 # =========================================================
 # STREAMLIT APP
 # =========================================================
 def main():
-    st.set_page_config(page_title="Generator-Victory Lotto", page_icon="🏆", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(
+        page_title="Generator-Victory Lotto",
+        page_icon="🏆",
+        layout="wide",
+        initial_sidebar_state="collapsed"  # important: avoid desktop hiding confusion
+    )
     st.markdown(LIGHT_GREEN_CSS, unsafe_allow_html=True)
 
     st.title(APP_TITLE)
     st.write("Generator typowań Lotto na bazie historii losowań z pliku **wyniki.pdf** (1–49, typuje 6 liczb).")
-    st.caption("Hot/Cold są wyliczane wyłącznie z prawdziwych wyników z PDF (częstotliwości). Cache = płynność.")
+    st.caption("Hot/Cold liczone z prawdziwych wyników. Panel ustawień jest w treści strony (zawsze widoczny na komputerze).")
 
-    # Session init
     if "last_records" not in st.session_state:
         st.session_state["last_records"] = []
     if "last_daily" not in st.session_state:
@@ -603,81 +681,18 @@ def main():
 
     pdf_path = Path(os.getcwd()) / PDF_FILENAME
 
-    # Sidebar
-    with st.sidebar:
-        st.header("⚙️ Ustawienia")
-
-        mode_ui = st.selectbox(
-            "Tryb typowania",
-            [
-                "Hybryda 70/20/10 (hot/cold/mix)",
-                "Tylko 🔥 gorące",
-                "Tylko ❄️ zimne",
-                "Tylko ⚗️ mix (hot+zimne)",
-            ],
-            index=0
-        )
-
-        st.divider()
-
-        # NEW: User can choose how many latest draws to use to compute HOT/COLD (based on TRUE results)
-        history_window = st.selectbox(
-            "Ile ostatnich losowań brać do analizy HOT/COLD?",
-            [50, 100, 250, 500, 999],
-            index=4
-        )
-
-        n_tickets = st.slider("Liczba kuponów", 1, 500, 50, 1)
-
-        st.divider()
-        hot_size = st.slider("Ile liczb w grupie Gorących", 6, 35, 20, 1)
-        cold_size = st.slider("Ile liczb w grupie Zimnych", 6, 35, 20, 1)
-
-        st.divider()
-        mix_hot_count = st.slider("MIX: ile liczb z gorących?", 1, 5, 3, 1)
-
-        st.divider()
-        st.subheader("🧠 Tryb inteligentny (opcjonalny)")
-        smart_enabled = st.checkbox("Włącz tryb inteligentny", value=False)
-
-        if smart_enabled:
-            block_run_2 = st.checkbox("Blokuj układy 1–2 (kolejne liczby)", value=True)
-            block_run_3 = st.checkbox("Blokuj układy 1–3 (ciąg 3 kolejnych)", value=True)
-
-            limit_pairs_on = st.checkbox("Włącz limit par (kolejne liczby)", value=True)
-            max_adj_pairs = None
-            if limit_pairs_on:
-                max_adj_pairs = st.slider("Maks. liczba par kolejnych", 0, 5, 2, 1)
-
-            even_odd_choice = st.radio(
-                "Parzyste / Nieparzyste (6 liczb)",
-                ["Dowolnie", "3/3", "4/2", "2/4", "5/1", "1/5", "6/0", "0/6"],
-                index=0
-            )
-
-            max_attempts_per_ticket = st.slider("Limit prób na kupon", 10, 500, 120, 10)
-        else:
-            block_run_2 = False
-            block_run_3 = False
-            max_adj_pairs = None
-            even_odd_choice = "Dowolnie"
-            max_attempts_per_ticket = 120
-
-        st.divider()
-        preview_limit = st.slider("Ile kuponów pokazać w podglądzie", 10, 200, 60, 10)
-
-    # Input card
     st.markdown('<div class="v-card">', unsafe_allow_html=True)
     st.subheader("📄 Dane wejściowe")
     st.write(f"Plik: `{pdf_path}`")
     st.write(f"Silnik PDF: **{'PyMuPDF (fitz)' if HAS_PYMUPDF else 'pypdf (fallback)'}**")
-    st.markdown('<div class="v-muted">HOT/COLD liczone są z prawdziwych wyników. Możesz ograniczyć analizę do np. ostatnich 100/250/999 losowań (w sidebarze).</div>', unsafe_allow_html=True)
+    st.markdown('<div class="v-muted">Jeśli sidebar jest niewidoczny na komputerze — to normalne. Ustawienia masz niżej w „Ustawienia (panel główny)”.</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     if not pdf_path.exists():
         st.error(f"❌ Nie znaleziono `{PDF_FILENAME}` obok `app.py`. Dodaj plik do repo i zrób Reboot.")
         st.stop()
 
+    # Load PDF once (cached)
     try:
         pdf_bytes = pdf_path.read_bytes()
         result_records_all = load_records_cached(pdf_bytes)
@@ -686,15 +701,36 @@ def main():
         st.code(str(e))
         st.stop()
 
-    # Limit to last N draws for analysis
-    history_window = int(history_window)
-    result_records = result_records_all[:history_window]
+    # SETTINGS — always visible (desktop fix)
+    defaults = {
+        "mode_index": 0,
+        "hist_index": 4,
+        "n_tickets": 50,
+        "hot_size": 20,
+        "cold_size": 20,
+        "mix_hot_count": 3,
+        "preview_limit": 60,
+        "smart_enabled": False,
+        "block_run_2": True,
+        "block_run_3": True,
+        "limit_pairs_on": True,
+        "max_adj_pairs": 2,
+        "even_odd_idx": 0,
+        "max_attempts": 120
+    }
+
+    # On desktop: show settings in expander to avoid huge vertical block
+    with st.expander("⚙️ Ustawienia (kliknij, aby rozwinąć)", expanded=True):
+        cfg = settings_panel(defaults)
+
+    # Use selected window for analysis
+    result_records = result_records_all[:cfg["history_window"]]
     draws = [r["nums"] for r in result_records]
 
-    # Frequency from TRUE results in chosen window
     freq_df = compute_freq_df_cached(draws)
-    hot, cold, _neutral = build_groups_from_freq(freq_df, hot_size=hot_size, cold_size=cold_size)
+    hot, cold, _neutral = build_groups_from_freq(freq_df, hot_size=cfg["hot_size"], cold_size=cfg["cold_size"])
 
+    # Stats panels
     left, right = st.columns([1.2, 0.8], gap="large")
 
     with left:
@@ -706,25 +742,25 @@ def main():
 
     with right:
         st.markdown('<div class="v-card">', unsafe_allow_html=True)
-        st.subheader("🔥 Gorące / ❄️ Zimne (z wybranej historii)")
-        st.markdown("**Gorące (Hot) — najczęściej losowane**")
+        st.subheader("🔥 Gorące / ❄️ Zimne")
+        st.markdown("**Gorące (Hot)**")
         st.markdown(" ".join([f'<span class="v-pill">{n:02d}</span>' for n in sorted(hot)]), unsafe_allow_html=True)
-        st.markdown("**Zimne (Cold) — najrzadziej losowane**")
+        st.markdown("**Zimne (Cold)**")
         st.markdown(" ".join([f'<span class="v-pill">{n:02d}</span>' for n in sorted(cold)]), unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown('<div class="v-card">', unsafe_allow_html=True)
-        st.subheader("🎛️ Wybrany tryb")
-        st.write(f"**Tryb:** {mode_ui}")
-        if mode_ui == "Tylko ⚗️ mix (hot+zimne)":
-            st.write(f"**MIX:** {mix_hot_count} z gorących + {PICK_COUNT - mix_hot_count} z zimnych")
-        st.write(f"**Tryb inteligentny:** {'TAK' if smart_enabled else 'NIE'}")
+        st.subheader("🎛️ Podsumowanie trybu")
+        st.write(f"**Tryb:** {cfg['mode_ui']}")
+        st.write(f"**Analiza HOT/COLD:** ostatnie **{cfg['history_window']}** losowań")
+        st.write(f"**Tryb inteligentny:** {'TAK' if cfg['smart_enabled'] else 'NIE'}")
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
 
+    # Action buttons
     st.markdown('<div class="v-card">', unsafe_allow_html=True)
-    st.subheader("🎟️ Generator (losowanie z HOT/COLD wyliczonych z prawdziwych wyników)")
+    st.subheader("🎟️ Generator")
 
     col_btn1, col_btn2, col_btn3 = st.columns(3, gap="large")
     with col_btn1:
@@ -738,6 +774,7 @@ def main():
         st.session_state["show_results"] = not st.session_state["show_results"]
 
     # Mode mapping
+    mode_ui = cfg["mode_ui"]
     if mode_ui == "Hybryda 70/20/10 (hot/cold/mix)":
         base_mode_kind = "hybrid"
     elif mode_ui == "Tylko 🔥 gorące":
@@ -750,12 +787,12 @@ def main():
     def gen_one_record() -> Dict:
         if base_mode_kind == "hybrid":
             chosen = random.choices(["hot", "cold", "mix"], weights=[HYBRID_HOT_P, HYBRID_COLD_P, HYBRID_MIX_P], k=1)[0]
-            return {"Typ": chosen, "Kupon": gen_ticket(chosen, hot, cold, mix_hot_count)}
+            return {"Typ": chosen, "Kupon": gen_ticket(chosen, hot, cold, cfg["mix_hot_count"])}
         if base_mode_kind == "hot":
-            return {"Typ": "hot", "Kupon": gen_ticket("hot", hot, cold, mix_hot_count)}
+            return {"Typ": "hot", "Kupon": gen_ticket("hot", hot, cold, cfg["mix_hot_count"])}
         if base_mode_kind == "cold":
-            return {"Typ": "cold", "Kupon": gen_ticket("cold", hot, cold, mix_hot_count)}
-        return {"Typ": "mix", "Kupon": gen_ticket("mix", hot, cold, mix_hot_count)}
+            return {"Typ": "cold", "Kupon": gen_ticket("cold", hot, cold, cfg["mix_hot_count"])}
+        return {"Typ": "mix", "Kupon": gen_ticket("mix", hot, cold, cfg["mix_hot_count"])}
 
     # Generate tickets
     if generate:
@@ -763,9 +800,9 @@ def main():
         status = st.empty()
 
         with st.spinner("Generuję kupony..."):
-            if not smart_enabled:
+            if not cfg["smart_enabled"]:
                 recs: List[Dict] = []
-                total = int(n_tickets)
+                total = int(cfg["n_tickets"])
                 for i in range(total):
                     recs.append(gen_one_record())
                     if (i + 1) % 10 == 0 or (i + 1) == total:
@@ -773,32 +810,32 @@ def main():
                         status.write(f"Postęp: {i+1}/{total}")
             else:
                 smart_kwargs = {
-                    "block_run_2": block_run_2,
-                    "block_run_3": block_run_3,
-                    "max_adjacent_pairs": max_adj_pairs,
-                    "even_odd_choice": even_odd_choice
+                    "block_run_2": cfg["block_run_2"],
+                    "block_run_3": cfg["block_run_3"],
+                    "max_adjacent_pairs": cfg["max_adj_pairs"],
+                    "even_odd_choice": cfg["even_odd_choice"]
                 }
                 recs = generate_with_smart_filters(
                     gen_func=gen_one_record,
-                    n_tickets=int(n_tickets),
-                    max_attempts_per_ticket=int(max_attempts_per_ticket),
+                    n_tickets=int(cfg["n_tickets"]),
+                    max_attempts_per_ticket=int(cfg["max_attempts_per_ticket"]),
                     smart_kwargs=smart_kwargs
                 )
                 progress.progress(100)
-                status.write(f"Postęp: {len(recs)}/{int(n_tickets)}")
+                status.write(f"Postęp: {len(recs)}/{int(cfg['n_tickets'])}")
 
         progress.empty()
         status.empty()
 
-        if smart_enabled and len(recs) < int(n_tickets):
+        if cfg["smart_enabled"] and len(recs) < int(cfg["n_tickets"]):
             st.warning(
-                f"⚠️ Filtry są ostre: wygenerowano **{len(recs)}** / {int(n_tickets)} kuponów. "
+                f"⚠️ Filtry są ostre: wygenerowano **{len(recs)}** / {int(cfg['n_tickets'])} kuponów. "
                 "Poluzuj filtry albo zwiększ limit prób."
             )
 
         st.session_state["last_records"] = recs
 
-    # Daily numbers (based on last N results from chosen window)
+    # Daily numbers
     if daily:
         prefer_parity = parity_bias_from_last_n(draws, 10)
         prefer_level = high_low_bias_from_last_two(draws, threshold=24)
@@ -823,12 +860,12 @@ def main():
             "target_spread": target_spread
         }
 
-    # Show last results (from full PDF, newest first)
+    # Show results (10/50/100) + txt download
     if st.session_state["show_results"]:
         st.markdown("### 📋 Ostatnie wyniki (z PDF)")
         count_choice = st.selectbox("Ile ostatnich wyników pokazać?", [10, 50, 100], index=0)
-
         slice_records = result_records_all[:int(count_choice)]
+
         df_results = pd.DataFrame({
             "Numer losowania": [r["draw_no"] if r["draw_no"] is not None else "—" for r in slice_records],
             "Data": [r["date_str"] for r in slice_records],
@@ -839,11 +876,9 @@ def main():
         st.markdown('<div class="v-muted">Zapis jest dostępny wyłącznie jako plik TXT (pobieranie → folder „Pobrane”).</div>', unsafe_allow_html=True)
         filename_input = st.text_input("Nazwa pliku .txt (np. wyniki.txt)", value="wyniki.txt")
         safe_name = sanitize_txt_filename(filename_input)
-
-        txt_bytes = make_txt_for_results(slice_records)
         st.download_button(
             "⬇️ Pobierz wyniki jako TXT",
-            data=txt_bytes,
+            data=make_txt_for_results(slice_records),
             file_name=safe_name,
             mime="text/plain",
             use_container_width=True
@@ -871,7 +906,7 @@ def main():
                 return "wyższe"
             return "dowolnie"
 
-        st.markdown("### 🌿 Twoje szczęśliwe cyfry dnia (z HOT na bazie prawdziwych wyników)")
+        st.markdown("### 🌿 Twoje szczęśliwe cyfry dnia")
         st.markdown(
             f'<div class="v-row"><b>Zestaw dnia</b> — {nums} '
             f'<span class="v-muted"> | parzyste/nieparzyste: {ev}/{od} | pary: {pairs}</span></div>',
@@ -882,16 +917,16 @@ def main():
         st.markdown(f"- Ostatnie 2 wyniki: trend niskie/wysokie → dziś: **{level_to_text(info['prefer_level'])}** (z puli hot).")
         st.markdown(f"- Średni rozstrzał (10 wyników): **{info['target_spread']:.1f}** → dobieram zestaw o podobnym rozstrzale.")
 
-    # Render generated tickets + TXT export
+    # Render tickets + txt
     records = st.session_state.get("last_records", [])
     if records:
-        st.markdown("### 🎯 Wygenerowane kupony (losowane z HOT/COLD wg prawdziwych wyników)")
+        st.markdown("### 🎯 Wygenerowane kupony")
         df_out = pd.DataFrame({
             "Typ": [r["Typ"] for r in records],
             "Kupon": [" ".join(f"{x:02d}" for x in r["Kupon"]) for r in records],
         })
 
-        preview_n = min(int(preview_limit), len(records))
+        preview_n = min(int(cfg["preview_limit"]), len(records))
         st.caption(f"Podgląd pierwszych **{preview_n}** kuponów (pełna lista w tabeli).")
 
         for i in range(preview_n):
@@ -913,11 +948,9 @@ def main():
         st.markdown('<div class="v-muted">Zapis kuponów jest dostępny wyłącznie jako plik TXT (pobieranie → „Pobrane”).</div>', unsafe_allow_html=True)
         ticket_filename_input = st.text_input("Nazwa pliku kuponów .txt (np. kupony.txt)", value="kupony.txt")
         safe_ticket_name = sanitize_txt_filename(ticket_filename_input)
-
-        txt_tickets = make_txt_for_tickets(records)
         st.download_button(
             "⬇️ Pobierz kupony jako TXT",
-            data=txt_tickets,
+            data=make_txt_for_tickets(records),
             file_name=safe_ticket_name,
             mime="text/plain",
             use_container_width=True
@@ -927,14 +960,7 @@ def main():
 
     with st.expander("✅ Kontrola (pierwsze 3 rekordy z PDF — powinny być najnowsze)"):
         for i, r in enumerate(result_records_all[:3], start=1):
-            st.write(f"{i}. Losowanie: {r['draw_no']} | Wynik: {' '.join(f'{x:02d}' for x in r['nums'])} | Data: {r['date_str']}")
-
-    with st.expander("📌 Diagnostyka (TOP/LOW)"):
-        st.write("TOP 15 najczęstszych liczb:")
-        st.dataframe(freq_df.head(15), use_container_width=True, hide_index=True)
-        st.write("LOW 15 najrzadszych liczb:")
-        st.dataframe(freq_df.tail(15).sort_values(["Wystąpienia", "Liczba"]), use_container_width=True, hide_index=True)
-
+            st.write(f"{i}. Losowanie: {r['draw_no']} | Wynik: {' '.join(f'{x:02d}' for x in r['nums'])}")
 
 if __name__ == "__main__":
     main()
