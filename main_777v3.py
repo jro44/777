@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 
 # =========================================================
-# PDF engines
+# PDF ENGINES
 # =========================================================
 try:
     import fitz  # PyMuPDF
@@ -172,7 +172,6 @@ def _validate_pdf_bytes(pdf_bytes: bytes) -> None:
         head = pdf_bytes[:240].decode("utf-8", errors="replace")
         raise ValueError(
             "Plik 'wyniki.pdf' nie wygląda jak prawdziwy PDF (brak nagłówka %PDF).\n"
-            "Jeśli używasz Git LFS, do repo mógł trafić tylko pointer.\n\n"
             f"Początek pliku:\n{head}"
         )
 
@@ -210,6 +209,12 @@ def _extract_tokens_and_drawnos_from_page(page_text: str) -> Tuple[List[int], Li
 
     for ln in lines:
         if "Lotto" in ln and "6/49" in ln:
+            continue
+        if "multipasko" in ln.lower():
+            continue
+        if "www." in ln.lower():
+            continue
+        if "©" in ln:
             continue
 
         ints = [int(x) for x in INT_RE.findall(ln)]
@@ -325,7 +330,8 @@ def load_records_cached(pdf_bytes: bytes) -> List[Dict]:
     if not draws:
         raise RuntimeError("Nie znaleziono żadnych wyników (tokenów 1–49) w PDF.")
 
-    return _pair_draws_with_drawnos(draws, all_drawnos)
+    records = _pair_draws_with_drawnos(draws, all_drawnos)
+    return records
 
 
 # =========================================================
@@ -346,11 +352,6 @@ def build_groups_from_freq(freq_df: pd.DataFrame, hot_size: int, cold_size: int)
     return hot, cold, neutral
 
 def build_hot_master_set(freq_df: pd.DataFrame) -> List[int]:
-    """
-    New feature:
-    Returns one fixed set of 6 numbers built from the most frequent numbers
-    in the true historical results currently selected by the user.
-    """
     return sorted(freq_df.head(PICK_COUNT)["Liczba"].tolist())
 
 
@@ -380,7 +381,7 @@ def gen_ticket(mode: str, hot: List[int], cold: List[int], mix_hot_count: int) -
 
 
 # =========================================================
-# SMART MODE FILTERS
+# SMART MODE
 # =========================================================
 def count_adjacent_pairs(nums_sorted: List[int]) -> int:
     return sum(1 for a, b in zip(nums_sorted, nums_sorted[1:]) if b == a + 1)
@@ -534,20 +535,108 @@ def pick_daily_set_from_hot(
             best_score = score
             best = cand
 
-        if prefer_parity != "ANY" and prefer_level != "ANY":
-            ev, od = even_odd_split(cand)
-            low = sum(1 for x in cand if x <= threshold)
-            high = pick_count - low
-            parity_ok = (ev > od) if prefer_parity == "EVEN" else (od > ev)
-            level_ok = (high > low) if prefer_level == "HIGH" else (low > high)
-            if parity_ok and level_ok:
-                return cand
-
     return best if best is not None else sorted(random.sample(range(nmin, nmax + 1), pick_count))
 
 
 # =========================================================
-# EXPORT (TXT)
+# NEW FEATURE — POSITIONAL DIFFERENCE ANALYSIS
+# =========================================================
+def _choose_candidate_from_diffs(base_value: int, diff_counter: Counter, used: set, nmin: int, nmax: int) -> Optional[int]:
+    for diff, _count in diff_counter.most_common():
+        candidate = base_value + diff
+        if nmin <= candidate <= nmax and candidate not in used:
+            return candidate
+    return None
+
+def build_positional_difference_set(draws: List[List[int]], window: int) -> Dict:
+    """
+    Uses the latest draw as reference.
+    For each position 1..6:
+    - compare latest[i] with draws[j][i]
+    - compute diff = previous_position_value - latest_position_value
+    - choose the most common signed diff
+    - candidate = latest_position_value + most_common_diff
+    """
+    if not draws:
+        return {
+            "set": [],
+            "details": [],
+            "window_used": 0
+        }
+
+    latest = sorted(draws[0])
+    subset = draws[:max(2, min(window, len(draws)))]
+    previous_draws = [sorted(d) for d in subset[1:]]
+
+    used = set()
+    result: List[int] = []
+    details: List[Dict] = []
+
+    for pos in range(PICK_COUNT):
+        latest_val = latest[pos]
+        diffs = []
+
+        for prev in previous_draws:
+            if len(prev) != PICK_COUNT:
+                continue
+            diff = prev[pos] - latest_val
+            diffs.append(diff)
+
+        diff_counter = Counter(diffs)
+        chosen = _choose_candidate_from_diffs(latest_val, diff_counter, used, NUM_MIN, NUM_MAX)
+
+        if chosen is None:
+            fallback = latest_val
+            if fallback in used:
+                for candidate in range(NUM_MIN, NUM_MAX + 1):
+                    if candidate not in used:
+                        fallback = candidate
+                        break
+            chosen = fallback
+
+        used.add(chosen)
+        result.append(chosen)
+
+        most_common_diff = None
+        most_common_count = 0
+        if diff_counter:
+            most_common_diff, most_common_count = diff_counter.most_common(1)[0]
+
+        details.append({
+            "Pozycja": pos + 1,
+            "Najnowsza liczba": latest_val,
+            "Najczęstsza różnica": most_common_diff if most_common_diff is not None else 0,
+            "Ile razy": most_common_count,
+            "Wybrana liczba": chosen
+        })
+
+    result = sorted(result)
+
+    # jeśli po sortowaniu pojawiłyby się duplikaty (bardzo rzadko), napraw
+    if len(set(result)) < PICK_COUNT:
+        fixed = []
+        used2 = set()
+        for n in result:
+            if n not in used2:
+                fixed.append(n)
+                used2.add(n)
+            else:
+                for c in range(NUM_MIN, NUM_MAX + 1):
+                    if c not in used2:
+                        fixed.append(c)
+                        used2.add(c)
+                        break
+        result = sorted(fixed[:PICK_COUNT])
+
+    return {
+        "set": result,
+        "details": details,
+        "window_used": len(subset)
+    }
+
+
+# =========================================================
+# TXT EXPORT
 # =========================================================
 def sanitize_txt_filename(name: str) -> str:
     name = (name or "").strip()
@@ -570,8 +659,9 @@ def make_txt_for_results(result_records: List[Dict]) -> bytes:
     for r in result_records:
         draw_no = r.get("draw_no")
         draw_str = str(draw_no) if draw_no is not None else "—"
+        date_str = r.get("date_str") or "—"
         nums = " ".join(f"{x:02d}" for x in r["nums"])
-        lines.append(f"Losowanie: {draw_str} | Wynik: {nums}")
+        lines.append(f"Losowanie: {draw_str} | Data: {date_str} | Wynik: {nums}")
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 def make_txt_for_hot_master_set(hot_master_set: List[int], history_window: int) -> bytes:
@@ -582,6 +672,26 @@ def make_txt_for_hot_master_set(hot_master_set: List[int], history_window: int) 
         f"Zestaw: {nums}\n"
     )
     return text.encode("utf-8")
+
+def make_txt_for_difference_set(diff_data: Dict, selected_window: int) -> bytes:
+    nums = " ".join(f"{x:02d}" for x in diff_data["set"])
+    lines = [
+        "Zestaw różnic pozycyjnych",
+        f"Wybrany zakres użytkownika: {selected_window}",
+        f"Faktycznie użyty zakres: {diff_data['window_used']}",
+        f"Zestaw: {nums}",
+        "",
+        "Szczegóły pozycji:"
+    ]
+    for d in diff_data["details"]:
+        lines.append(
+            f"Pozycja {d['Pozycja']}: "
+            f"najnowsza={d['Najnowsza liczba']}, "
+            f"najczęstsza różnica={d['Najczęstsza różnica']}, "
+            f"ile razy={d['Ile razy']}, "
+            f"wybrana={d['Wybrana liczba']}"
+        )
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 # =========================================================
@@ -606,6 +716,13 @@ def settings_panel(defaults: Dict) -> Dict:
         "Ile ostatnich losowań brać do analizy HOT/COLD?",
         [50, 100, 250, 500, 999],
         index=defaults.get("hist_index", 4)
+    )
+
+    # NEW
+    difference_window = st.selectbox(
+        "Analiza różnic pozycyjnych — zakres losowań",
+        [50, 100, 250, 500, 750, 999],
+        index=defaults.get("diff_hist_index", 5)
     )
 
     c1, c2 = st.columns(2)
@@ -650,6 +767,7 @@ def settings_panel(defaults: Dict) -> Dict:
     return {
         "mode_ui": mode_ui,
         "history_window": int(history_window),
+        "difference_window": int(difference_window),
         "n_tickets": int(n_tickets),
         "hot_size": int(hot_size),
         "cold_size": int(cold_size),
@@ -678,7 +796,7 @@ def main():
 
     st.title(APP_TITLE)
     st.write("Generator typowań Lotto na bazie historii losowań z pliku **wyniki.pdf** (1–49, typuje 6 liczb).")
-    st.caption("Nowy element: możesz wyciągnąć jeden gotowy zestaw 6 najczęściej losowanych cyfr z prawdziwych wyników.")
+    st.caption("Dodano nową funkcję analizy różnic pozycyjnych dla 6 pozycji na podstawie wybranego zakresu losowań.")
 
     if "last_records" not in st.session_state:
         st.session_state["last_records"] = []
@@ -688,6 +806,8 @@ def main():
         st.session_state["show_results"] = False
     if "hot_master_set" not in st.session_state:
         st.session_state["hot_master_set"] = None
+    if "difference_set" not in st.session_state:
+        st.session_state["difference_set"] = None
 
     pdf_path = Path(os.getcwd()) / PDF_FILENAME
 
@@ -695,11 +815,11 @@ def main():
     st.subheader("📄 Dane wejściowe")
     st.write(f"Plik: `{pdf_path}`")
     st.write(f"Silnik PDF: **{'PyMuPDF (fitz)' if HAS_PYMUPDF else 'pypdf (fallback)'}**")
-    st.markdown('<div class="v-muted">Jeśli sidebar jest niewidoczny na komputerze — to normalne. Ustawienia masz niżej w „Ustawienia (panel główny)”.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="v-muted">HOT/COLD liczone są z prawdziwych wyników. Nowa analiza różnic pozycyjnych działa na tej samej bazie wyników.</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     if not pdf_path.exists():
-        st.error(f"❌ Nie znaleziono `{PDF_FILENAME}` obok `app.py`. Dodaj plik do repo i zrób Reboot.")
+        st.error(f"❌ Nie znaleziono `{PDF_FILENAME}` obok `app.py`.")
         st.stop()
 
     try:
@@ -713,6 +833,7 @@ def main():
     defaults = {
         "mode_index": 0,
         "hist_index": 4,
+        "diff_hist_index": 5,
         "n_tickets": 50,
         "hot_size": 20,
         "cold_size": 20,
@@ -749,16 +870,17 @@ def main():
     with right:
         st.markdown('<div class="v-card">', unsafe_allow_html=True)
         st.subheader("🔥 Gorące / ❄️ Zimne")
-        st.markdown("**Gorące (Hot)**")
+        st.markdown("**Gorące (Hot) — najczęściej losowane**")
         st.markdown(" ".join([f'<span class="v-pill">{n:02d}</span>' for n in sorted(hot)]), unsafe_allow_html=True)
-        st.markdown("**Zimne (Cold)**")
+        st.markdown("**Zimne (Cold) — najrzadziej losowane**")
         st.markdown(" ".join([f'<span class="v-pill">{n:02d}</span>' for n in sorted(cold)]), unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown('<div class="v-card">', unsafe_allow_html=True)
-        st.subheader("🎛️ Podsumowanie trybu")
+        st.subheader("🎛️ Wybrany tryb")
         st.write(f"**Tryb:** {cfg['mode_ui']}")
         st.write(f"**Analiza HOT/COLD:** ostatnie **{cfg['history_window']}** losowań")
+        st.write(f"**Analiza różnic pozycyjnych:** ostatnie **{cfg['difference_window']}** losowań")
         st.write(f"**Tryb inteligentny:** {'TAK' if cfg['smart_enabled'] else 'NIE'}")
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -767,21 +889,27 @@ def main():
     st.markdown('<div class="v-card">', unsafe_allow_html=True)
     st.subheader("🎟️ Generator")
 
-    col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4, gap="large")
+    col_btn1, col_btn2, col_btn3, col_btn4, col_btn5 = st.columns(5, gap="large")
     with col_btn1:
-        generate = st.button("🏆 GENERUJ KUPONY (6 liczb)", type="primary", use_container_width=True)
+        generate = st.button("🏆 GENERUJ KUPONY", type="primary", use_container_width=True)
     with col_btn2:
-        daily = st.button("🌿 TWOJE SZCZĘŚLIWE CYFRY DNIA", type="primary", use_container_width=True)
+        daily = st.button("🌿 SZCZĘŚLIWE CYFRY DNIA", type="primary", use_container_width=True)
     with col_btn3:
         show_res = st.button("📋 POKAŻ WYNIKI", type="primary", use_container_width=True)
     with col_btn4:
         show_hot_set = st.button("🔥 ZESTAW 6 HOT", type="primary", use_container_width=True)
+    with col_btn5:
+        build_diff_set = st.button("📐 ZESTAW RÓŻNIC", type="primary", use_container_width=True)
 
     if show_res:
         st.session_state["show_results"] = not st.session_state["show_results"]
 
     if show_hot_set:
         st.session_state["hot_master_set"] = hot_master_set
+
+    if build_diff_set:
+        diff_data = build_positional_difference_set([r["nums"] for r in result_records_all], cfg["difference_window"])
+        st.session_state["difference_set"] = diff_data
 
     mode_ui = cfg["mode_ui"]
     if mode_ui == "Hybryda 70/20/10 (hot/cold/mix)":
@@ -870,8 +998,8 @@ def main():
     if st.session_state["show_results"]:
         st.markdown("### 📋 Ostatnie wyniki (z PDF)")
         count_choice = st.selectbox("Ile ostatnich wyników pokazać?", [10, 50, 100], index=0)
-        slice_records = result_records_all[:int(count_choice)]
 
+        slice_records = result_records_all[:int(count_choice)]
         df_results = pd.DataFrame({
             "Numer losowania": [r["draw_no"] if r["draw_no"] is not None else "—" for r in slice_records],
             "Data": [r["date_str"] for r in slice_records],
@@ -900,19 +1028,39 @@ def main():
             f'<span class="v-muted"> | wyliczone z ostatnich {cfg["history_window"]} prawdziwych losowań</span></div>',
             unsafe_allow_html=True
         )
-        st.markdown("#### Jak to działa?")
-        st.markdown(
-            "Aplikacja bierze wszystkie prawdziwe wyniki z wybranego zakresu historii, "
-            "liczy częstotliwość występowania każdej liczby 1–49 i wybiera dokładnie 6 liczb, "
-            "które pojawiały się najczęściej."
-        )
 
-        hot_set_filename_input = st.text_input("Nazwa pliku zestawu HOT .txt (np. hot6.txt)", value="hot6.txt")
+        hot_set_filename_input = st.text_input("Nazwa pliku zestawu HOT .txt", value="hot6.txt")
         safe_hot_name = sanitize_txt_filename(hot_set_filename_input)
         st.download_button(
             "⬇️ Pobierz zestaw HOT 6 jako TXT",
             data=make_txt_for_hot_master_set(hot_set, cfg["history_window"]),
             file_name=safe_hot_name,
+            mime="text/plain",
+            use_container_width=True
+        )
+
+    # NEW FEATURE RENDER
+    if st.session_state.get("difference_set") is not None:
+        diff_data = st.session_state["difference_set"]
+        diff_set_str = " ".join(f"{x:02d}" for x in diff_data["set"])
+
+        st.markdown("### 📐 Zestaw różnic pozycyjnych")
+        st.markdown(
+            f'<div class="v-row"><b>Zestaw różnic</b> — {diff_set_str} '
+            f'<span class="v-muted"> | zakres użytkownika: {cfg["difference_window"]} | faktycznie użyto: {diff_data["window_used"]}</span></div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown("#### Szczegóły pozycji")
+        df_diff = pd.DataFrame(diff_data["details"])
+        st.dataframe(df_diff, use_container_width=True, hide_index=True)
+
+        diff_filename_input = st.text_input("Nazwa pliku zestawu różnic .txt", value="roznice_pozycyjne.txt")
+        safe_diff_name = sanitize_txt_filename(diff_filename_input)
+        st.download_button(
+            "⬇️ Pobierz zestaw różnic jako TXT",
+            data=make_txt_for_difference_set(diff_data, cfg["difference_window"]),
+            file_name=safe_diff_name,
             mime="text/plain",
             use_container_width=True
         )
@@ -945,9 +1093,9 @@ def main():
             unsafe_allow_html=True
         )
         st.markdown("#### Jak to wyliczam?")
-        st.markdown(f"- Ostatnie 10 wyników: przewaga parzystych/nieparzystych → dziś: **{pref_to_text(info['prefer_parity'])}** (z puli hot).")
-        st.markdown(f"- Ostatnie 2 wyniki: trend niskie/wysokie → dziś: **{level_to_text(info['prefer_level'])}** (z puli hot).")
-        st.markdown(f"- Średni rozstrzał (10 wyników): **{info['target_spread']:.1f}** → dobieram zestaw o podobnym rozstrzale.")
+        st.markdown(f"- Ostatnie 10 wyników: przewaga parzystych/nieparzystych → dziś: **{pref_to_text(info['prefer_parity'])}**.")
+        st.markdown(f"- Ostatnie 2 wyniki: trend niskie/wysokie → dziś: **{level_to_text(info['prefer_level'])}**.")
+        st.markdown(f"- Średni rozstrzał (10 wyników): **{info['target_spread']:.1f}**.")
 
     records = st.session_state.get("last_records", [])
     if records:
@@ -977,7 +1125,7 @@ def main():
         st.dataframe(df_out, use_container_width=True, hide_index=True)
 
         st.markdown('<div class="v-muted">Zapis kuponów jest dostępny wyłącznie jako plik TXT (pobieranie → „Pobrane”).</div>', unsafe_allow_html=True)
-        ticket_filename_input = st.text_input("Nazwa pliku kuponów .txt (np. kupony.txt)", value="kupony.txt")
+        ticket_filename_input = st.text_input("Nazwa pliku kuponów .txt", value="kupony.txt")
         safe_ticket_name = sanitize_txt_filename(ticket_filename_input)
         st.download_button(
             "⬇️ Pobierz kupony jako TXT",
@@ -987,11 +1135,16 @@ def main():
             use_container_width=True
         )
 
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    with st.expander("✅ Kontrola (pierwsze 3 rekordy z PDF — powinny być najnowsze)"):
-        for i, r in enumerate(result_records_all[:3], start=1):
+    with st.expander("✅ Kontrola (pierwsze 5 rekordów z PDF — powinny być najnowsze)"):
+        for i, r in enumerate(result_records_all[:5], start=1):
             st.write(f"{i}. Losowanie: {r['draw_no']} | Wynik: {' '.join(f'{x:02d}' for x in r['nums'])}")
+
+    with st.expander("📌 Diagnostyka (TOP/LOW)"):
+        st.write("TOP 15 najczęstszych liczb:")
+        st.dataframe(freq_df.head(15), use_container_width=True, hide_index=True)
+        st.write("LOW 15 najrzadszych liczb:")
+        st.dataframe(freq_df.tail(15).sort_values(["Wystąpienia", "Liczba"]), use_container_width=True, hide_index=True)
+
 
 if __name__ == "__main__":
     main()
