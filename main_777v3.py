@@ -354,6 +354,51 @@ def build_groups_from_freq(freq_df: pd.DataFrame, hot_size: int, cold_size: int)
 def build_hot_master_set(freq_df: pd.DataFrame) -> List[int]:
     return sorted(freq_df.head(PICK_COUNT)["Liczba"].tolist())
 
+@st.cache_data(show_spinner=False)
+def compute_presence_percent_df_cached(draws: List[List[int]]) -> pd.DataFrame:
+    """
+    Liczy w ilu % losowań dana liczba wystąpiła przynajmniej raz.
+    Dla Lotto 6/49 to naturalna miara 'jak często padała w losowaniach'.
+    """
+    total_draws = len(draws)
+    presence_counter = Counter()
+
+    for draw in draws:
+        unique_nums = set(draw)
+        for n in unique_nums:
+            presence_counter[n] += 1
+
+    rows = []
+    for n in range(NUM_MIN, NUM_MAX + 1):
+        hits = presence_counter.get(n, 0)
+        pct = (hits / total_draws * 100.0) if total_draws > 0 else 0.0
+        rows.append({
+            "Liczba": n,
+            "Liczba_losowan_z_wystapieniem": hits,
+            "Procent_losowan": pct
+        })
+
+    df = pd.DataFrame(rows).sort_values(
+        ["Procent_losowan", "Liczba_losowan_z_wystapieniem", "Liczba"],
+        ascending=[False, False, True]
+    ).reset_index(drop=True)
+    return df
+
+def build_hot_max_percent_set(draws_for_window: List[List[int]]) -> Dict:
+    """
+    Nowa funkcja:
+    jeśli user wybierze 'tylko gorące' + 'HOT MAX 6',
+    to zestaw jest tworzony jako 6 liczb o najwyższym procencie wystąpień
+    w wybranym oknie losowań.
+    """
+    pct_df = compute_presence_percent_df_cached(draws_for_window)
+    top6 = pct_df.head(PICK_COUNT).copy()
+    result_set = sorted(top6["Liczba"].tolist())
+    return {
+        "set": result_set,
+        "table": top6
+    }
+
 
 # =========================================================
 # GENERATION
@@ -378,6 +423,10 @@ def gen_ticket(mode: str, hot: List[int], cold: List[int], mix_hot_count: int) -
         c = pick_unique([x for x in cold if x not in h], PICK_COUNT - mix_hot_count)
         return sorted(h + c)
     raise ValueError("Nieznany tryb losowania.")
+
+def gen_ticket_hot_max_percent(draws_for_window: List[List[int]]) -> Tuple[List[int], pd.DataFrame]:
+    hot_max = build_hot_max_percent_set(draws_for_window)
+    return hot_max["set"], hot_max["table"]
 
 
 # =========================================================
@@ -539,7 +588,7 @@ def pick_daily_set_from_hot(
 
 
 # =========================================================
-# NEW FEATURE — POSITIONAL DIFFERENCE ANALYSIS
+# POSITIONAL DIFFERENCE ANALYSIS
 # =========================================================
 def _choose_candidate_from_diffs(base_value: int, diff_counter: Counter, used: set, nmin: int, nmax: int) -> Optional[int]:
     for diff, _count in diff_counter.most_common():
@@ -549,14 +598,6 @@ def _choose_candidate_from_diffs(base_value: int, diff_counter: Counter, used: s
     return None
 
 def build_positional_difference_set(draws: List[List[int]], window: int) -> Dict:
-    """
-    Uses the latest draw as reference.
-    For each position 1..6:
-    - compare latest[i] with draws[j][i]
-    - compute diff = previous_position_value - latest_position_value
-    - choose the most common signed diff
-    - candidate = latest_position_value + most_common_diff
-    """
     if not draws:
         return {
             "set": [],
@@ -612,7 +653,6 @@ def build_positional_difference_set(draws: List[List[int]], window: int) -> Dict
 
     result = sorted(result)
 
-    # jeśli po sortowaniu pojawiłyby się duplikaty (bardzo rzadko), napraw
     if len(set(result)) < PICK_COUNT:
         fixed = []
         used2 = set()
@@ -693,6 +733,23 @@ def make_txt_for_difference_set(diff_data: Dict, selected_window: int) -> bytes:
         )
     return ("\n".join(lines) + "\n").encode("utf-8")
 
+def make_txt_for_hot_max_set(hot_max_set: List[int], hot_max_table: pd.DataFrame, selected_window: int) -> bytes:
+    nums = " ".join(f"{x:02d}" for x in hot_max_set)
+    lines = [
+        "HOT MAX 6 — zestaw 6 najczęściej padających liczb wg procentu losowań",
+        f"Zakres analizy: ostatnie {selected_window} losowań",
+        f"Zestaw: {nums}",
+        "",
+        "TOP 6:"
+    ]
+    for _, row in hot_max_table.iterrows():
+        lines.append(
+            f"Liczba {int(row['Liczba']):02d} | "
+            f"Losowania z wystąpieniem: {int(row['Liczba_losowan_z_wystapieniem'])} | "
+            f"Procent: {float(row['Procent_losowan']):.2f}%"
+        )
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
 
 # =========================================================
 # SETTINGS PANEL
@@ -714,11 +771,10 @@ def settings_panel(defaults: Dict) -> Dict:
 
     history_window = st.selectbox(
         "Ile ostatnich losowań brać do analizy HOT/COLD?",
-        [50, 100, 250, 500, 999],
-        index=defaults.get("hist_index", 4)
+        [50, 100, 250, 500, 750, 1000],
+        index=defaults.get("hist_index", 5)
     )
 
-    # NEW
     difference_window = st.selectbox(
         "Analiza różnic pozycyjnych — zakres losowań",
         [50, 100, 250, 500, 750, 999],
@@ -734,6 +790,19 @@ def settings_panel(defaults: Dict) -> Dict:
         cold_size = st.slider("Ile liczb w grupie Zimnych", 6, 35, defaults.get("cold_size", 20), 1)
 
     mix_hot_count = st.slider("MIX: ile liczb z gorących?", 1, 5, defaults.get("mix_hot_count", 3), 1)
+
+    # NEW
+    st.markdown("---")
+    st.subheader("🔥 Opcja HOT MAX")
+    hot_max_enabled = st.checkbox(
+        "Włącz HOT MAX 6 (działa tylko przy trybie: Tylko gorące)",
+        value=defaults.get("hot_max_enabled", False)
+    )
+    hot_max_count = st.selectbox(
+        "Ile cyfr z HOT MAX?",
+        [1, 2, 3, 4, 5, 6],
+        index=defaults.get("hot_max_count_idx", 5)
+    )
 
     st.markdown("---")
     st.subheader("🧠 Tryb inteligentny (opcjonalny)")
@@ -773,6 +842,8 @@ def settings_panel(defaults: Dict) -> Dict:
         "cold_size": int(cold_size),
         "mix_hot_count": int(mix_hot_count),
         "preview_limit": int(preview_limit),
+        "hot_max_enabled": bool(hot_max_enabled),
+        "hot_max_count": int(hot_max_count),
         "smart_enabled": bool(smart_enabled),
         "block_run_2": bool(block_run_2),
         "block_run_3": bool(block_run_3),
@@ -796,7 +867,7 @@ def main():
 
     st.title(APP_TITLE)
     st.write("Generator typowań Lotto na bazie historii losowań z pliku **wyniki.pdf** (1–49, typuje 6 liczb).")
-    st.caption("Dodano nową funkcję analizy różnic pozycyjnych dla 6 pozycji na podstawie wybranego zakresu losowań.")
+    st.caption("Dodano opcję HOT MAX 6: przy trybie 'Tylko gorące' możesz wymusić zestaw z najczęściej występujących liczb wg procentu losowań.")
 
     if "last_records" not in st.session_state:
         st.session_state["last_records"] = []
@@ -808,6 +879,8 @@ def main():
         st.session_state["hot_master_set"] = None
     if "difference_set" not in st.session_state:
         st.session_state["difference_set"] = None
+    if "hot_max_set" not in st.session_state:
+        st.session_state["hot_max_set"] = None
 
     pdf_path = Path(os.getcwd()) / PDF_FILENAME
 
@@ -815,7 +888,7 @@ def main():
     st.subheader("📄 Dane wejściowe")
     st.write(f"Plik: `{pdf_path}`")
     st.write(f"Silnik PDF: **{'PyMuPDF (fitz)' if HAS_PYMUPDF else 'pypdf (fallback)'}**")
-    st.markdown('<div class="v-muted">HOT/COLD liczone są z prawdziwych wyników. Nowa analiza różnic pozycyjnych działa na tej samej bazie wyników.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="v-muted">HOT/COLD liczone są z prawdziwych wyników. Opcja HOT MAX bazuje na procencie losowań, w których liczba wystąpiła.</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     if not pdf_path.exists():
@@ -832,13 +905,15 @@ def main():
 
     defaults = {
         "mode_index": 0,
-        "hist_index": 4,
+        "hist_index": 5,
         "diff_hist_index": 5,
         "n_tickets": 50,
         "hot_size": 20,
         "cold_size": 20,
         "mix_hot_count": 3,
         "preview_limit": 60,
+        "hot_max_enabled": False,
+        "hot_max_count_idx": 5,
         "smart_enabled": False,
         "block_run_2": True,
         "block_run_3": True,
@@ -851,7 +926,9 @@ def main():
     with st.expander("⚙️ Ustawienia (kliknij, aby rozwinąć)", expanded=True):
         cfg = settings_panel(defaults)
 
-    result_records = result_records_all[:cfg["history_window"]]
+    # history window now supports 1000; cap to available
+    history_window_used = min(cfg["history_window"], len(result_records_all))
+    result_records = result_records_all[:history_window_used]
     draws = [r["nums"] for r in result_records]
 
     freq_df = compute_freq_df_cached(draws)
@@ -879,8 +956,10 @@ def main():
         st.markdown('<div class="v-card">', unsafe_allow_html=True)
         st.subheader("🎛️ Wybrany tryb")
         st.write(f"**Tryb:** {cfg['mode_ui']}")
-        st.write(f"**Analiza HOT/COLD:** ostatnie **{cfg['history_window']}** losowań")
+        st.write(f"**Analiza HOT/COLD:** ostatnie **{history_window_used}** losowań")
         st.write(f"**Analiza różnic pozycyjnych:** ostatnie **{cfg['difference_window']}** losowań")
+        st.write(f"**HOT MAX 6:** {'TAK' if cfg['hot_max_enabled'] else 'NIE'}")
+        st.write(f"**Liczb z HOT MAX:** {cfg['hot_max_count']}")
         st.write(f"**Tryb inteligentny:** {'TAK' if cfg['smart_enabled'] else 'NIE'}")
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -921,7 +1000,22 @@ def main():
     else:
         base_mode_kind = "mix"
 
+    hot_max_mode_active = (
+        base_mode_kind == "hot" and
+        cfg["hot_max_enabled"] and
+        cfg["hot_max_count"] == 6
+    )
+
     def gen_one_record() -> Dict:
+        # NEW: full HOT MAX 6 set by percent, only when selected
+        if hot_max_mode_active:
+            hot_max_set, hot_max_table = gen_ticket_hot_max_percent(draws)
+            return {
+                "Typ": "hot_max_6",
+                "Kupon": hot_max_set,
+                "HotMaxTable": hot_max_table
+            }
+
         if base_mode_kind == "hybrid":
             chosen = random.choices(["hot", "cold", "mix"], weights=[HYBRID_HOT_P, HYBRID_COLD_P, HYBRID_MIX_P], k=1)[0]
             return {"Typ": chosen, "Kupon": gen_ticket(chosen, hot, cold, cfg["mix_hot_count"])}
@@ -936,34 +1030,54 @@ def main():
         status = st.empty()
 
         with st.spinner("Generuję kupony..."):
-            if not cfg["smart_enabled"]:
-                recs: List[Dict] = []
+            if hot_max_mode_active:
+                # HOT MAX 6 returns always one fixed best set for the chosen window
+                hot_max_set, hot_max_table = gen_ticket_hot_max_percent(draws)
+                recs = []
                 total = int(cfg["n_tickets"])
                 for i in range(total):
-                    recs.append(gen_one_record())
+                    recs.append({
+                        "Typ": "hot_max_6",
+                        "Kupon": hot_max_set,
+                        "HotMaxTable": hot_max_table
+                    })
                     if (i + 1) % 10 == 0 or (i + 1) == total:
                         progress.progress(int((i + 1) / total * 100))
                         status.write(f"Postęp: {i+1}/{total}")
-            else:
-                smart_kwargs = {
-                    "block_run_2": cfg["block_run_2"],
-                    "block_run_3": cfg["block_run_3"],
-                    "max_adjacent_pairs": cfg["max_adj_pairs"],
-                    "even_odd_choice": cfg["even_odd_choice"]
+                st.session_state["hot_max_set"] = {
+                    "set": hot_max_set,
+                    "table": hot_max_table,
+                    "window": history_window_used
                 }
-                recs = generate_with_smart_filters(
-                    gen_func=gen_one_record,
-                    n_tickets=int(cfg["n_tickets"]),
-                    max_attempts_per_ticket=int(cfg["max_attempts_per_ticket"]),
-                    smart_kwargs=smart_kwargs
-                )
-                progress.progress(100)
-                status.write(f"Postęp: {len(recs)}/{int(cfg['n_tickets'])}")
+            else:
+                if not cfg["smart_enabled"]:
+                    recs: List[Dict] = []
+                    total = int(cfg["n_tickets"])
+                    for i in range(total):
+                        recs.append(gen_one_record())
+                        if (i + 1) % 10 == 0 or (i + 1) == total:
+                            progress.progress(int((i + 1) / total * 100))
+                            status.write(f"Postęp: {i+1}/{total}")
+                else:
+                    smart_kwargs = {
+                        "block_run_2": cfg["block_run_2"],
+                        "block_run_3": cfg["block_run_3"],
+                        "max_adjacent_pairs": cfg["max_adj_pairs"],
+                        "even_odd_choice": cfg["even_odd_choice"]
+                    }
+                    recs = generate_with_smart_filters(
+                        gen_func=gen_one_record,
+                        n_tickets=int(cfg["n_tickets"]),
+                        max_attempts_per_ticket=int(cfg["max_attempts_per_ticket"]),
+                        smart_kwargs=smart_kwargs
+                    )
+                    progress.progress(100)
+                    status.write(f"Postęp: {len(recs)}/{int(cfg['n_tickets'])}")
 
         progress.empty()
         status.empty()
 
-        if cfg["smart_enabled"] and len(recs) < int(cfg["n_tickets"]):
+        if cfg["smart_enabled"] and (not hot_max_mode_active) and len(recs) < int(cfg["n_tickets"]):
             st.warning(
                 f"⚠️ Filtry są ostre: wygenerowano **{len(recs)}** / {int(cfg['n_tickets'])} kuponów. "
                 "Poluzuj filtry albo zwiększ limit prób."
@@ -1025,7 +1139,7 @@ def main():
         st.markdown("### 🔥 Zestaw 6 najczęściej losowanych cyfr")
         st.markdown(
             f'<div class="v-row"><b>Zestaw HOT 6</b> — {hot_set_str} '
-            f'<span class="v-muted"> | wyliczone z ostatnich {cfg["history_window"]} prawdziwych losowań</span></div>',
+            f'<span class="v-muted"> | wyliczone z ostatnich {history_window_used} prawdziwych losowań</span></div>',
             unsafe_allow_html=True
         )
 
@@ -1033,13 +1147,41 @@ def main():
         safe_hot_name = sanitize_txt_filename(hot_set_filename_input)
         st.download_button(
             "⬇️ Pobierz zestaw HOT 6 jako TXT",
-            data=make_txt_for_hot_master_set(hot_set, cfg["history_window"]),
+            data=make_txt_for_hot_master_set(hot_set, history_window_used),
             file_name=safe_hot_name,
             mime="text/plain",
             use_container_width=True
         )
 
-    # NEW FEATURE RENDER
+    # NEW: HOT MAX render
+    if st.session_state.get("hot_max_set") is not None:
+        hms = st.session_state["hot_max_set"]
+        hot_max_set = hms["set"]
+        hot_max_table = hms["table"]
+        hot_max_str = " ".join(f"{x:02d}" for x in hot_max_set)
+
+        st.markdown("### 🔥 HOT MAX 6 — zestaw procentowy")
+        st.markdown(
+            f'<div class="v-row"><b>HOT MAX 6</b> — {hot_max_str} '
+            f'<span class="v-muted"> | zakres: ostatnie {hms["window"]} losowań | tryb: tylko gorące + HOT MAX 6</span></div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown("#### TOP 6 według procentu losowań")
+        hot_max_table_display = hot_max_table.copy()
+        hot_max_table_display["Procent_losowan"] = hot_max_table_display["Procent_losowan"].map(lambda x: f"{x:.2f}%")
+        st.dataframe(hot_max_table_display, use_container_width=True, hide_index=True)
+
+        hot_max_filename_input = st.text_input("Nazwa pliku HOT MAX .txt", value="hot_max_6.txt")
+        safe_hot_max_name = sanitize_txt_filename(hot_max_filename_input)
+        st.download_button(
+            "⬇️ Pobierz HOT MAX 6 jako TXT",
+            data=make_txt_for_hot_max_set(hot_max_set, hot_max_table, hms["window"]),
+            file_name=safe_hot_max_name,
+            mime="text/plain",
+            use_container_width=True
+        )
+
     if st.session_state.get("difference_set") is not None:
         diff_data = st.session_state["difference_set"]
         diff_set_str = " ".join(f"{x:02d}" for x in diff_data["set"])
