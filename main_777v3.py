@@ -335,30 +335,15 @@ def load_records_cached(pdf_bytes: bytes) -> List[Dict]:
 
 
 # =========================================================
-# STATS & GROUPS
+# STATS & GROUPS — PERCENT-BASED HOT/COLD
 # =========================================================
-@st.cache_data(show_spinner=False)
-def compute_freq_df_cached(draws: List[List[int]]) -> pd.DataFrame:
-    flat = [n for d in draws for n in d]
-    c = Counter(flat)
-    rows = [{"Liczba": n, "Wystąpienia": c.get(n, 0)} for n in range(NUM_MIN, NUM_MAX + 1)]
-    df = pd.DataFrame(rows).sort_values(["Wystąpienia", "Liczba"], ascending=[False, True]).reset_index(drop=True)
-    return df
-
-def build_groups_from_freq(freq_df: pd.DataFrame, hot_size: int, cold_size: int) -> Tuple[List[int], List[int], List[int]]:
-    hot = freq_df.head(hot_size)["Liczba"].tolist()
-    cold = freq_df.tail(cold_size)["Liczba"].tolist()
-    neutral = [n for n in range(NUM_MIN, NUM_MAX + 1) if n not in hot and n not in cold]
-    return hot, cold, neutral
-
-def build_hot_master_set(freq_df: pd.DataFrame) -> List[int]:
-    return sorted(freq_df.head(PICK_COUNT)["Liczba"].tolist())
-
 @st.cache_data(show_spinner=False)
 def compute_presence_percent_df_cached(draws: List[List[int]]) -> pd.DataFrame:
     """
     Liczy w ilu % losowań dana liczba wystąpiła przynajmniej raz.
-    Dla Lotto 6/49 to naturalna miara 'jak często padała w losowaniach'.
+    To właśnie ta statystyka jest teraz podstawą grup:
+    - gorące = najwyższy %
+    - zimne = najniższy %
     """
     total_draws = len(draws)
     presence_counter = Counter()
@@ -384,20 +369,14 @@ def compute_presence_percent_df_cached(draws: List[List[int]]) -> pd.DataFrame:
     ).reset_index(drop=True)
     return df
 
-def build_hot_max_percent_set(draws_for_window: List[List[int]]) -> Dict:
-    """
-    Nowa funkcja:
-    jeśli user wybierze 'tylko gorące' + 'HOT MAX 6',
-    to zestaw jest tworzony jako 6 liczb o najwyższym procencie wystąpień
-    w wybranym oknie losowań.
-    """
-    pct_df = compute_presence_percent_df_cached(draws_for_window)
-    top6 = pct_df.head(PICK_COUNT).copy()
-    result_set = sorted(top6["Liczba"].tolist())
-    return {
-        "set": result_set,
-        "table": top6
-    }
+def build_groups_from_percent(percent_df: pd.DataFrame, hot_size: int, cold_size: int) -> Tuple[List[int], List[int], List[int]]:
+    hot = percent_df.head(hot_size)["Liczba"].tolist()
+    cold = percent_df.tail(cold_size)["Liczba"].tolist()
+    neutral = [n for n in range(NUM_MIN, NUM_MAX + 1) if n not in hot and n not in cold]
+    return hot, cold, neutral
+
+def build_hot_master_set(percent_df: pd.DataFrame) -> List[int]:
+    return sorted(percent_df.head(PICK_COUNT)["Liczba"].tolist())
 
 
 # =========================================================
@@ -425,8 +404,10 @@ def gen_ticket(mode: str, hot: List[int], cold: List[int], mix_hot_count: int) -
     raise ValueError("Nieznany tryb losowania.")
 
 def gen_ticket_hot_max_percent(draws_for_window: List[List[int]]) -> Tuple[List[int], pd.DataFrame]:
-    hot_max = build_hot_max_percent_set(draws_for_window)
-    return hot_max["set"], hot_max["table"]
+    pct_df = compute_presence_percent_df_cached(draws_for_window)
+    top6 = pct_df.head(PICK_COUNT).copy()
+    result_set = sorted(top6["Liczba"].tolist())
+    return result_set, top6
 
 
 # =========================================================
@@ -707,7 +688,7 @@ def make_txt_for_results(result_records: List[Dict]) -> bytes:
 def make_txt_for_hot_master_set(hot_master_set: List[int], history_window: int) -> bytes:
     nums = " ".join(f"{x:02d}" for x in hot_master_set)
     text = (
-        f"Zestaw 6 najczęściej losowanych cyfr\n"
+        f"Zestaw 6 najczęściej padających liczb wg procentu losowań\n"
         f"Analizowana historia: ostatnie {history_window} losowań\n"
         f"Zestaw: {nums}\n"
     )
@@ -791,7 +772,6 @@ def settings_panel(defaults: Dict) -> Dict:
 
     mix_hot_count = st.slider("MIX: ile liczb z gorących?", 1, 5, defaults.get("mix_hot_count", 3), 1)
 
-    # NEW
     st.markdown("---")
     st.subheader("🔥 Opcja HOT MAX")
     hot_max_enabled = st.checkbox(
@@ -867,7 +847,7 @@ def main():
 
     st.title(APP_TITLE)
     st.write("Generator typowań Lotto na bazie historii losowań z pliku **wyniki.pdf** (1–49, typuje 6 liczb).")
-    st.caption("Dodano opcję HOT MAX 6: przy trybie 'Tylko gorące' możesz wymusić zestaw z najczęściej występujących liczb wg procentu losowań.")
+    st.caption("Grupy gorące i zimne są teraz liczone wyłącznie wg procentu wystąpień liczb w losowaniach z wybranego zakresu bazy.")
 
     if "last_records" not in st.session_state:
         st.session_state["last_records"] = []
@@ -888,7 +868,11 @@ def main():
     st.subheader("📄 Dane wejściowe")
     st.write(f"Plik: `{pdf_path}`")
     st.write(f"Silnik PDF: **{'PyMuPDF (fitz)' if HAS_PYMUPDF else 'pypdf (fallback)'}**")
-    st.markdown('<div class="v-muted">HOT/COLD liczone są z prawdziwych wyników. Opcja HOT MAX bazuje na procencie losowań, w których liczba wystąpiła.</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="v-muted">Gorące = najwyższy procent losowań z wystąpieniem liczby. '
+        'Zimne = najniższy procent losowań z wystąpieniem liczby.</div>',
+        unsafe_allow_html=True
+    )
     st.markdown("</div>", unsafe_allow_html=True)
 
     if not pdf_path.exists():
@@ -926,30 +910,31 @@ def main():
     with st.expander("⚙️ Ustawienia (kliknij, aby rozwinąć)", expanded=True):
         cfg = settings_panel(defaults)
 
-    # history window now supports 1000; cap to available
     history_window_used = min(cfg["history_window"], len(result_records_all))
     result_records = result_records_all[:history_window_used]
     draws = [r["nums"] for r in result_records]
 
-    freq_df = compute_freq_df_cached(draws)
-    hot, cold, _neutral = build_groups_from_freq(freq_df, hot_size=cfg["hot_size"], cold_size=cfg["cold_size"])
-    hot_master_set = build_hot_master_set(freq_df)
+    percent_df = compute_presence_percent_df_cached(draws)
+    hot, cold, _neutral = build_groups_from_percent(percent_df, hot_size=cfg["hot_size"], cold_size=cfg["cold_size"])
+    hot_master_set = build_hot_master_set(percent_df)
 
     left, right = st.columns([1.2, 0.8], gap="large")
 
     with left:
         st.markdown('<div class="v-card">', unsafe_allow_html=True)
-        st.subheader("📊 Częstotliwość 1–49 (z prawdziwych wyników)")
+        st.subheader("📊 Statystyka procentowa 1–49 (z prawdziwych wyników)")
         st.success(f"✅ Analizowane losowania: **{len(result_records)}** (z {len(result_records_all)} w PDF)")
-        st.dataframe(freq_df, use_container_width=True, hide_index=True)
+        percent_df_display = percent_df.copy()
+        percent_df_display["Procent_losowan"] = percent_df_display["Procent_losowan"].map(lambda x: f"{x:.2f}%")
+        st.dataframe(percent_df_display, use_container_width=True, hide_index=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right:
         st.markdown('<div class="v-card">', unsafe_allow_html=True)
         st.subheader("🔥 Gorące / ❄️ Zimne")
-        st.markdown("**Gorące (Hot) — najczęściej losowane**")
+        st.markdown("**Gorące (Hot) — najwyższy % wystąpień**")
         st.markdown(" ".join([f'<span class="v-pill">{n:02d}</span>' for n in sorted(hot)]), unsafe_allow_html=True)
-        st.markdown("**Zimne (Cold) — najrzadziej losowane**")
+        st.markdown("**Zimne (Cold) — najniższy % wystąpień**")
         st.markdown(" ".join([f'<span class="v-pill">{n:02d}</span>' for n in sorted(cold)]), unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1007,7 +992,6 @@ def main():
     )
 
     def gen_one_record() -> Dict:
-        # NEW: full HOT MAX 6 set by percent, only when selected
         if hot_max_mode_active:
             hot_max_set, hot_max_table = gen_ticket_hot_max_percent(draws)
             return {
@@ -1031,7 +1015,6 @@ def main():
 
         with st.spinner("Generuję kupony..."):
             if hot_max_mode_active:
-                # HOT MAX 6 returns always one fixed best set for the chosen window
                 hot_max_set, hot_max_table = gen_ticket_hot_max_percent(draws)
                 recs = []
                 total = int(cfg["n_tickets"])
@@ -1136,10 +1119,10 @@ def main():
         hot_set = st.session_state["hot_master_set"]
         hot_set_str = " ".join(f"{x:02d}" for x in hot_set)
 
-        st.markdown("### 🔥 Zestaw 6 najczęściej losowanych cyfr")
+        st.markdown("### 🔥 Zestaw 6 najczęściej padających liczb")
         st.markdown(
             f'<div class="v-row"><b>Zestaw HOT 6</b> — {hot_set_str} '
-            f'<span class="v-muted"> | wyliczone z ostatnich {history_window_used} prawdziwych losowań</span></div>',
+            f'<span class="v-muted"> | wyliczone z ostatnich {history_window_used} losowań według najwyższego % wystąpień</span></div>',
             unsafe_allow_html=True
         )
 
@@ -1153,7 +1136,6 @@ def main():
             use_container_width=True
         )
 
-    # NEW: HOT MAX render
     if st.session_state.get("hot_max_set") is not None:
         hms = st.session_state["hot_max_set"]
         hot_max_set = hms["set"]
@@ -1281,11 +1263,19 @@ def main():
         for i, r in enumerate(result_records_all[:5], start=1):
             st.write(f"{i}. Losowanie: {r['draw_no']} | Wynik: {' '.join(f'{x:02d}' for x in r['nums'])}")
 
-    with st.expander("📌 Diagnostyka (TOP/LOW)"):
-        st.write("TOP 15 najczęstszych liczb:")
-        st.dataframe(freq_df.head(15), use_container_width=True, hide_index=True)
-        st.write("LOW 15 najrzadszych liczb:")
-        st.dataframe(freq_df.tail(15).sort_values(["Wystąpienia", "Liczba"]), use_container_width=True, hide_index=True)
+    with st.expander("📌 Diagnostyka procentowa (TOP/LOW)"):
+        st.write("TOP 15 liczb o najwyższym procencie wystąpień:")
+        top_display = percent_df.head(15).copy()
+        top_display["Procent_losowan"] = top_display["Procent_losowan"].map(lambda x: f"{x:.2f}%")
+        st.dataframe(top_display, use_container_width=True, hide_index=True)
+
+        st.write("LOW 15 liczb o najniższym procencie wystąpień:")
+        low_display = percent_df.tail(15).sort_values(
+            ["Procent_losowan", "Liczba_losowan_z_wystapieniem", "Liczba"],
+            ascending=[True, True, True]
+        ).copy()
+        low_display["Procent_losowan"] = low_display["Procent_losowan"].map(lambda x: f"{x:.2f}%")
+        st.dataframe(low_display, use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
