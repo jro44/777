@@ -3,6 +3,7 @@ import os
 import re
 import random
 from collections import Counter
+from itertools import combinations
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 
@@ -57,6 +58,7 @@ LIGHT_GREEN_CSS = """
   --mut:#111827;
   --green:#00a86b;
   --green2:#00c27a;
+  --gold:#d4af37;
   --border: rgba(0,168,107,0.22);
   --shadow: 0 10px 28px rgba(0,0,0,.08);
 }
@@ -107,6 +109,17 @@ LIGHT_GREEN_CSS = """
   color: #000000 !important;
 }
 
+.v-pill-premium{
+  display:inline-block;
+  padding: 6px 10px;
+  margin: 3px 4px 0 0;
+  border-radius: 999px;
+  border: 1px solid rgba(212, 175, 55, 0.45);
+  background: rgba(212, 175, 55, 0.16);
+  font-weight: 900;
+  color: #000000 !important;
+}
+
 .v-muted{
   opacity: .86;
   font-size: .92rem;
@@ -116,6 +129,15 @@ LIGHT_GREEN_CSS = """
 .v-row{
   background: rgba(0, 168, 107, 0.06);
   border: 1px solid rgba(0, 168, 107, 0.18);
+  border-radius: 14px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  color: #000000 !important;
+}
+
+.v-row-premium{
+  background: rgba(212, 175, 55, 0.10);
+  border: 1px solid rgba(212, 175, 55, 0.34);
   border-radius: 14px;
   padding: 10px 12px;
   margin: 8px 0;
@@ -339,12 +361,6 @@ def load_records_cached(pdf_bytes: bytes) -> List[Dict]:
 # =========================================================
 @st.cache_data(show_spinner=False)
 def compute_presence_percent_df_cached(draws: List[List[int]]) -> pd.DataFrame:
-    """
-    Liczy w ilu % losowań dana liczba wystąpiła przynajmniej raz.
-    To właśnie ta statystyka jest teraz podstawą grup:
-    - gorące = najwyższy %
-    - zimne = najniższy %
-    """
     total_draws = len(draws)
     presence_counter = Counter()
 
@@ -657,6 +673,357 @@ def build_positional_difference_set(draws: List[List[int]], window: int) -> Dict
 
 
 # =========================================================
+# TURBO SCORE / RANKING KUPONÓW
+# =========================================================
+@st.cache_data(show_spinner=False)
+def compute_pair_triple_stats_cached(draws: List[List[int]]) -> Tuple[Counter, Counter]:
+    pair_counter = Counter()
+    triple_counter = Counter()
+
+    for draw in draws:
+        sdraw = sorted(draw)
+        for pair in combinations(sdraw, 2):
+            pair_counter[pair] += 1
+        for triple in combinations(sdraw, 3):
+            triple_counter[triple] += 1
+
+    return pair_counter, triple_counter
+
+def build_target_profile(draws: List[List[int]]) -> Dict:
+    spreads = [(max(d) - min(d)) for d in draws if d]
+    pair_counts = [count_adjacent_pairs(sorted(d)) for d in draws if d]
+
+    even_odd_counter = Counter()
+    low_high_counter = Counter()
+
+    for d in draws:
+        s = sorted(d)
+        ev, od = even_odd_split(s)
+        even_odd_counter[(ev, od)] += 1
+
+        low = sum(1 for x in s if x <= 24)
+        high = len(s) - low
+        low_high_counter[(low, high)] += 1
+
+    target_even_odd = even_odd_counter.most_common(1)[0][0] if even_odd_counter else (3, 3)
+    target_low_high = low_high_counter.most_common(1)[0][0] if low_high_counter else (3, 3)
+    target_spread = sum(spreads) / len(spreads) if spreads else 0.0
+    target_pairs = sum(pair_counts) / len(pair_counts) if pair_counts else 0.0
+
+    return {
+        "target_even_odd": target_even_odd,
+        "target_low_high": target_low_high,
+        "target_spread": target_spread,
+        "target_pairs": target_pairs,
+    }
+
+def similarity_to_recent(ticket: List[int], recent_draws: List[List[int]]) -> int:
+    tset = set(ticket)
+    if not recent_draws:
+        return 0
+    return max(len(tset.intersection(set(d))) for d in recent_draws)
+
+def score_ticket(
+    ticket: List[int],
+    percent_map: Dict[int, float],
+    pair_counter: Counter,
+    triple_counter: Counter,
+    target_profile: Dict,
+    recent_draws: List[List[int]]
+) -> Dict:
+    sticket = sorted(ticket)
+
+    number_score = sum(percent_map.get(n, 0.0) for n in sticket)
+
+    pair_score_raw = sum(pair_counter.get(tuple(pair), 0) for pair in combinations(sticket, 2))
+    triple_score_raw = sum(triple_counter.get(tuple(triple), 0) for triple in combinations(sticket, 3))
+
+    ev, od = even_odd_split(sticket)
+    target_ev, target_od = target_profile["target_even_odd"]
+    even_odd_penalty = abs(ev - target_ev) + abs(od - target_od)
+
+    low = sum(1 for x in sticket if x <= 24)
+    high = len(sticket) - low
+    target_low, target_high = target_profile["target_low_high"]
+    low_high_penalty = abs(low - target_low) + abs(high - target_high)
+
+    spread = sticket[-1] - sticket[0]
+    spread_penalty = abs(spread - target_profile["target_spread"])
+
+    adj_pairs = count_adjacent_pairs(sticket)
+    pair_shape_penalty = abs(adj_pairs - target_profile["target_pairs"])
+
+    recent_similarity = similarity_to_recent(sticket, recent_draws)
+
+    final_score = (
+        number_score * 3.0
+        + pair_score_raw * 0.55
+        + triple_score_raw * 1.10
+        - even_odd_penalty * 2.0
+        - low_high_penalty * 2.0
+        - spread_penalty * 0.10
+        - pair_shape_penalty * 1.3
+        - recent_similarity * 4.0
+    )
+
+    return {
+        "ticket": sticket,
+        "number_score": number_score,
+        "pair_score_raw": pair_score_raw,
+        "triple_score_raw": triple_score_raw,
+        "evens": ev,
+        "odds": od,
+        "low": low,
+        "high": high,
+        "spread": spread,
+        "adj_pairs": adj_pairs,
+        "recent_similarity": recent_similarity,
+        "final_score": final_score,
+    }
+
+def generate_candidate_tickets(
+    count_candidates: int,
+    base_mode_kind: str,
+    hot: List[int],
+    cold: List[int],
+    mix_hot_count: int
+) -> List[List[int]]:
+    candidates = []
+
+    for _ in range(count_candidates):
+        if base_mode_kind == "hybrid":
+            chosen = random.choices(["hot", "cold", "mix"], weights=[HYBRID_HOT_P, HYBRID_COLD_P, HYBRID_MIX_P], k=1)[0]
+            candidates.append(gen_ticket(chosen, hot, cold, mix_hot_count))
+        elif base_mode_kind == "hot":
+            candidates.append(gen_ticket("hot", hot, cold, mix_hot_count))
+        elif base_mode_kind == "cold":
+            candidates.append(gen_ticket("cold", hot, cold, mix_hot_count))
+        else:
+            candidates.append(gen_ticket("mix", hot, cold, mix_hot_count))
+
+    uniq = []
+    seen = set()
+    for t in candidates:
+        key = tuple(sorted(t))
+        if key not in seen:
+            seen.add(key)
+            uniq.append(sorted(t))
+
+    return uniq
+
+def build_turbo_score_ranking(
+    draws_for_window: List[List[int]],
+    hot: List[int],
+    cold: List[int],
+    base_mode_kind: str,
+    mix_hot_count: int,
+    candidate_count: int,
+    top_n: int
+) -> Dict:
+    percent_df = compute_presence_percent_df_cached(draws_for_window)
+    percent_map = dict(zip(percent_df["Liczba"], percent_df["Procent_losowan"]))
+
+    pair_counter, triple_counter = compute_pair_triple_stats_cached(draws_for_window)
+    target_profile = build_target_profile(draws_for_window)
+    recent_draws = draws_for_window[:10]
+
+    candidates = generate_candidate_tickets(
+        count_candidates=candidate_count,
+        base_mode_kind=base_mode_kind,
+        hot=hot,
+        cold=cold,
+        mix_hot_count=mix_hot_count
+    )
+
+    scored = []
+    for ticket in candidates:
+        scored.append(
+            score_ticket(
+                ticket=ticket,
+                percent_map=percent_map,
+                pair_counter=pair_counter,
+                triple_counter=triple_counter,
+                target_profile=target_profile,
+                recent_draws=recent_draws
+            )
+        )
+
+    scored.sort(key=lambda x: x["final_score"], reverse=True)
+    best = scored[:top_n]
+
+    rows = []
+    for i, item in enumerate(best, start=1):
+        rows.append({
+            "Ranking": i,
+            "Kupon": " ".join(f"{x:02d}" for x in item["ticket"]),
+            "Score": round(item["final_score"], 2),
+            "Score liczb": round(item["number_score"], 2),
+            "Score par": item["pair_score_raw"],
+            "Score trójek": item["triple_score_raw"],
+            "Parzyste/Nieparzyste": f"{item['evens']}/{item['odds']}",
+            "Niskie/Wysokie": f"{item['low']}/{item['high']}",
+            "Rozstrzał": item["spread"],
+            "Pary kolejne": item["adj_pairs"],
+            "Podobieństwo do ostatnich": item["recent_similarity"],
+        })
+
+    return {
+        "rows": rows,
+        "target_profile": target_profile,
+        "candidate_count_used": len(candidates)
+    }
+
+
+# =========================================================
+# PREMIUM MODE
+# =========================================================
+def mutate_ticket(ticket: List[int], source_pool: List[int], replace_count: int) -> List[int]:
+    base = set(ticket)
+    replace_count = min(replace_count, len(base))
+    to_remove = set(random.sample(list(base), replace_count))
+    kept = [x for x in base if x not in to_remove]
+    available = [x for x in source_pool if x not in kept]
+    need = PICK_COUNT - len(kept)
+
+    if len(available) < need:
+        available = [x for x in range(NUM_MIN, NUM_MAX + 1) if x not in kept]
+
+    added = random.sample(available, need)
+    return sorted(kept + added)
+
+def build_premium_ranking(
+    draws_for_window: List[List[int]],
+    hot: List[int],
+    cold: List[int],
+    mix_hot_count: int,
+    candidate_count: int,
+    top_n: int
+) -> Dict:
+    percent_df = compute_presence_percent_df_cached(draws_for_window)
+    percent_map = dict(zip(percent_df["Liczba"], percent_df["Procent_losowan"]))
+    pair_counter, triple_counter = compute_pair_triple_stats_cached(draws_for_window)
+    target_profile = build_target_profile(draws_for_window)
+    recent_draws = draws_for_window[:10]
+
+    hot_max_set, hot_max_table = gen_ticket_hot_max_percent(draws_for_window)
+    diff_data = build_positional_difference_set(draws_for_window, min(999, len(draws_for_window)))
+    diff_set = diff_data["set"]
+
+    # baza kandydatów premium z wielu źródeł
+    seed_candidates = []
+    seed_candidates.append(sorted(hot_max_set))
+    seed_candidates.append(sorted(diff_set))
+
+    turbo_seed = build_turbo_score_ranking(
+        draws_for_window=draws_for_window,
+        hot=hot,
+        cold=cold,
+        base_mode_kind="hybrid",
+        mix_hot_count=mix_hot_count,
+        candidate_count=max(100, candidate_count // 2),
+        top_n=min(10, top_n * 2)
+    )
+    for row in turbo_seed["rows"]:
+        seed_candidates.append(sorted([int(x) for x in row["Kupon"].split()]))
+
+    # kandydaci zwykli
+    ordinary_candidates = generate_candidate_tickets(
+        count_candidates=max(candidate_count, 200),
+        base_mode_kind="hybrid",
+        hot=hot,
+        cold=cold,
+        mix_hot_count=mix_hot_count
+    )
+    seed_candidates.extend(ordinary_candidates)
+
+    # mutacje premium
+    source_pool = list(dict.fromkeys(hot + hot_max_set + diff_set + list(range(NUM_MIN, NUM_MAX + 1))))
+    mutated = []
+    for cand in seed_candidates[:min(len(seed_candidates), candidate_count)]:
+        mutated.append(sorted(cand))
+        mutated.append(mutate_ticket(cand, source_pool, 1))
+        mutated.append(mutate_ticket(cand, source_pool, 2))
+
+    all_candidates = seed_candidates + mutated
+
+    uniq = []
+    seen = set()
+    for t in all_candidates:
+        key = tuple(sorted(t))
+        if len(key) == PICK_COUNT and key not in seen:
+            seen.add(key)
+            uniq.append(sorted(t))
+
+    premium_scored = []
+
+    hot_max_set_ref = set(hot_max_set)
+    diff_set_ref = set(diff_set)
+    hot_ref = set(hot)
+
+    for ticket in uniq:
+        base = score_ticket(
+            ticket=ticket,
+            percent_map=percent_map,
+            pair_counter=pair_counter,
+            triple_counter=triple_counter,
+            target_profile=target_profile,
+            recent_draws=recent_draws
+        )
+
+        overlap_hot_max = len(set(ticket).intersection(hot_max_set_ref))
+        overlap_diff = len(set(ticket).intersection(diff_set_ref))
+        overlap_hot = len(set(ticket).intersection(hot_ref))
+
+        premium_bonus = (
+            overlap_hot_max * 5.0
+            + overlap_diff * 3.0
+            + overlap_hot * 1.2
+        )
+
+        final_premium_score = base["final_score"] + premium_bonus
+
+        premium_scored.append({
+            **base,
+            "premium_bonus": premium_bonus,
+            "overlap_hot_max": overlap_hot_max,
+            "overlap_diff": overlap_diff,
+            "overlap_hot": overlap_hot,
+            "premium_final_score": final_premium_score,
+        })
+
+    premium_scored.sort(key=lambda x: x["premium_final_score"], reverse=True)
+    best = premium_scored[:top_n]
+
+    rows = []
+    for i, item in enumerate(best, start=1):
+        rows.append({
+            "Ranking": i,
+            "Kupon": " ".join(f"{x:02d}" for x in item["ticket"]),
+            "Premium Score": round(item["premium_final_score"], 2),
+            "Bazowy Score": round(item["final_score"], 2),
+            "Bonus Premium": round(item["premium_bonus"], 2),
+            "HOT MAX trafień": item["overlap_hot_max"],
+            "Różnice trafień": item["overlap_diff"],
+            "Hot trafień": item["overlap_hot"],
+            "Parzyste/Nieparzyste": f"{item['evens']}/{item['odds']}",
+            "Niskie/Wysokie": f"{item['low']}/{item['high']}",
+            "Rozstrzał": item["spread"],
+            "Pary kolejne": item["adj_pairs"],
+            "Podobieństwo do ostatnich": item["recent_similarity"],
+        })
+
+    return {
+        "rows": rows,
+        "candidate_count_used": len(uniq),
+        "hot_max_set": hot_max_set,
+        "hot_max_table": hot_max_table,
+        "diff_set": diff_set,
+        "diff_details": diff_data["details"],
+        "target_profile": target_profile,
+    }
+
+
+# =========================================================
 # TXT EXPORT
 # =========================================================
 def sanitize_txt_filename(name: str) -> str:
@@ -731,6 +1098,50 @@ def make_txt_for_hot_max_set(hot_max_set: List[int], hot_max_table: pd.DataFrame
         )
     return ("\n".join(lines) + "\n").encode("utf-8")
 
+def make_txt_for_turbo_score(rows: List[Dict], candidate_count_used: int) -> bytes:
+    lines = [
+        "Turbo Score — ranking kuponów",
+        f"Liczba ocenionych kandydatów: {candidate_count_used}",
+        ""
+    ]
+    for row in rows:
+        lines.append(
+            f"#{row['Ranking']} | {row['Kupon']} | "
+            f"Score={row['Score']} | "
+            f"Liczby={row['Score liczb']} | "
+            f"Pary={row['Score par']} | "
+            f"Trójki={row['Score trójek']} | "
+            f"Parzyste/Nieparzyste={row['Parzyste/Nieparzyste']} | "
+            f"Niskie/Wysokie={row['Niskie/Wysokie']} | "
+            f"Rozstrzał={row['Rozstrzał']} | "
+            f"Pary kolejne={row['Pary kolejne']} | "
+            f"Podobieństwo do ostatnich={row['Podobieństwo do ostatnich']}"
+        )
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+def make_txt_for_premium(rows: List[Dict], candidate_count_used: int) -> bytes:
+    lines = [
+        "Premium Mode — ranking kuponów",
+        f"Liczba ocenionych kandydatów: {candidate_count_used}",
+        ""
+    ]
+    for row in rows:
+        lines.append(
+            f"#{row['Ranking']} | {row['Kupon']} | "
+            f"Premium Score={row['Premium Score']} | "
+            f"Base Score={row['Bazowy Score']} | "
+            f"Bonus={row['Bonus Premium']} | "
+            f"HOT MAX trafień={row['HOT MAX trafień']} | "
+            f"Różnice trafień={row['Różnice trafień']} | "
+            f"Hot trafień={row['Hot trafień']} | "
+            f"Parzyste/Nieparzyste={row['Parzyste/Nieparzyste']} | "
+            f"Niskie/Wysokie={row['Niskie/Wysokie']} | "
+            f"Rozstrzał={row['Rozstrzał']} | "
+            f"Pary kolejne={row['Pary kolejne']} | "
+            f"Podobieństwo do ostatnich={row['Podobieństwo do ostatnich']}"
+        )
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
 
 # =========================================================
 # SETTINGS PANEL
@@ -746,47 +1157,107 @@ def settings_panel(defaults: Dict) -> Dict:
             "Tylko 🔥 gorące",
             "Tylko ❄️ zimne",
             "Tylko ⚗️ mix (hot+zimne)",
+            "Premium 👑",
         ],
-        index=defaults.get("mode_index", 0)
+        index=defaults.get("mode_index", 0),
+        help="Premium łączy HOT/COLD, HOT MAX, różnice pozycyjne i ranking scoringowy."
     )
 
     history_window = st.selectbox(
         "Ile ostatnich losowań brać do analizy HOT/COLD?",
         [50, 100, 250, 500, 750, 1000],
-        index=defaults.get("hist_index", 5)
+        index=defaults.get("hist_index", 5),
+        help="Ten zakres wpływa na wyliczanie gorących i zimnych liczb oraz procentów wystąpień."
     )
 
     difference_window = st.selectbox(
         "Analiza różnic pozycyjnych — zakres losowań",
         [50, 100, 250, 500, 750, 999],
-        index=defaults.get("diff_hist_index", 5)
+        index=defaults.get("diff_hist_index", 5),
+        help="Zakres danych używany przez funkcję zestawu różnic pozycyjnych."
     )
 
     c1, c2 = st.columns(2)
     with c1:
-        n_tickets = st.slider("Liczba kuponów", 1, 500, defaults.get("n_tickets", 50), 1)
-        hot_size = st.slider("Ile liczb w grupie Gorących", 6, 35, defaults.get("hot_size", 20), 1)
+        n_tickets = st.slider(
+            "Liczba kuponów",
+            1, 500, defaults.get("n_tickets", 50), 1,
+            help="Ile kuponów ma wygenerować aplikacja."
+        )
+        hot_size = st.slider(
+            "Ile liczb w grupie Gorących",
+            6, 35, defaults.get("hot_size", 20), 1,
+            help="Rozmiar grupy gorących liczb wyliczanych z najwyższego procentu wystąpień."
+        )
     with c2:
-        preview_limit = st.slider("Ile kuponów pokazać w podglądzie", 10, 200, defaults.get("preview_limit", 60), 10)
-        cold_size = st.slider("Ile liczb w grupie Zimnych", 6, 35, defaults.get("cold_size", 20), 1)
+        preview_limit = st.slider(
+            "Ile kuponów pokazać w podglądzie",
+            10, 200, defaults.get("preview_limit", 60), 10,
+            help="Ile kuponów pokazać na ekranie przed pełną tabelą."
+        )
+        cold_size = st.slider(
+            "Ile liczb w grupie Zimnych",
+            6, 35, defaults.get("cold_size", 20), 1,
+            help="Rozmiar grupy zimnych liczb wyliczanych z najniższego procentu wystąpień."
+        )
 
-    mix_hot_count = st.slider("MIX: ile liczb z gorących?", 1, 5, defaults.get("mix_hot_count", 3), 1)
+    mix_hot_count = st.slider(
+        "MIX: ile liczb z gorących?",
+        1, 5, defaults.get("mix_hot_count", 3), 1,
+        help="W trybie MIX określa ile liczb ma pochodzić z grupy gorącej."
+    )
 
     st.markdown("---")
     st.subheader("🔥 Opcja HOT MAX")
     hot_max_enabled = st.checkbox(
         "Włącz HOT MAX 6 (działa tylko przy trybie: Tylko gorące)",
-        value=defaults.get("hot_max_enabled", False)
+        value=defaults.get("hot_max_enabled", False),
+        help="Tworzy zestaw z liczb o najwyższym procencie wystąpień w losowaniach."
     )
     hot_max_count = st.selectbox(
         "Ile cyfr z HOT MAX?",
         [1, 2, 3, 4, 5, 6],
-        index=defaults.get("hot_max_count_idx", 5)
+        index=defaults.get("hot_max_count_idx", 5),
+        help="Przy wartości 6 generator tworzy pełny zestaw HOT MAX 6."
+    )
+
+    st.markdown("---")
+    st.subheader("⭐ Turbo Score / Ranking kuponów")
+    turbo_candidate_count = st.selectbox(
+        "Ile kandydatów ma ocenić Turbo Score?",
+        [100, 200, 300, 500, 750, 1000],
+        index=defaults.get("turbo_candidate_idx", 3),
+        help="Ile kuponów kandydatów ma zostać wygenerowanych i ocenionych punktowo."
+    )
+    turbo_top_n = st.selectbox(
+        "Ile najlepszych kuponów pokazać?",
+        [3, 5, 10, 15, 20],
+        index=defaults.get("turbo_top_idx", 2),
+        help="Ile najwyżej ocenionych kuponów ma zostać pokazanych po rankingu."
+    )
+
+    st.markdown("---")
+    st.subheader("👑 Premium")
+    premium_candidate_count = st.selectbox(
+        "Premium: ile kandydatów ma zbudować silnik premium?",
+        [200, 300, 500, 750, 1000, 1500],
+        index=defaults.get("premium_candidate_idx", 2),
+        help="Premium generuje i miesza kandydatów z wielu źródeł, a potem wybiera najlepsze."
+    )
+    premium_top_n = st.selectbox(
+        "Premium: ile finalnych kuponów pokazać?",
+        [3, 5, 10, 15, 20],
+        index=defaults.get("premium_top_idx", 2),
+        help="Ile najwyżej ocenionych kuponów premium ma zostać pokazanych."
     )
 
     st.markdown("---")
     st.subheader("🧠 Tryb inteligentny (opcjonalny)")
-    smart_enabled = st.checkbox("Włącz tryb inteligentny", value=defaults.get("smart_enabled", False))
+    smart_enabled = st.checkbox(
+        "Włącz tryb inteligentny",
+        value=defaults.get("smart_enabled", False),
+        help="Dodatkowe filtry: kolejne liczby, limit par i balans parzyste/nieparzyste."
+    )
 
     if smart_enabled:
         block_run_2 = st.checkbox("Blokuj układy 1–2 (kolejne liczby)", value=defaults.get("block_run_2", True))
@@ -824,6 +1295,10 @@ def settings_panel(defaults: Dict) -> Dict:
         "preview_limit": int(preview_limit),
         "hot_max_enabled": bool(hot_max_enabled),
         "hot_max_count": int(hot_max_count),
+        "turbo_candidate_count": int(turbo_candidate_count),
+        "turbo_top_n": int(turbo_top_n),
+        "premium_candidate_count": int(premium_candidate_count),
+        "premium_top_n": int(premium_top_n),
         "smart_enabled": bool(smart_enabled),
         "block_run_2": bool(block_run_2),
         "block_run_3": bool(block_run_3),
@@ -831,6 +1306,54 @@ def settings_panel(defaults: Dict) -> Dict:
         "even_odd_choice": even_odd_choice,
         "max_attempts_per_ticket": int(max_attempts_per_ticket),
     }
+
+
+# =========================================================
+# FEATURE DESCRIPTIONS
+# =========================================================
+def render_feature_descriptions():
+    with st.expander("📘 Opisy funkcji aplikacji", expanded=False):
+        st.markdown("""
+**🏆 Generuj kupony**  
+Tworzy kupony zgodnie z wybranym trybem: hybryda, tylko gorące, tylko zimne, mix albo premium.
+
+**🌿 Szczęśliwe cyfry dnia**  
+Buduje zestaw dnia na podstawie ostatnich losowań, balansu parzyste/nieparzyste, niskie/wysokie i rozstrzału.
+
+**📋 Pokaż wyniki**  
+Pokazuje ostatnie wyniki wczytane z `wyniki.pdf`.
+
+**🔥 Zestaw 6 HOT**  
+Pokazuje 6 liczb o najwyższym procencie wystąpień w losowaniach z wybranego zakresu.
+
+**📐 Zestaw różnic**  
+Analizuje różnice pozycji 1–6 między najnowszym losowaniem a wcześniejszymi losowaniami i buduje nowy zestaw.
+
+**🔥 HOT MAX 6**  
+Gdy aktywne i ustawione na 6 przy trybie „Tylko gorące”, tworzy pełny zestaw 6 liczb o najwyższym procencie wystąpień.
+
+**⭐ Turbo Score / Ranking kuponów**  
+Generuje wielu kandydatów, punktuje ich i wybiera najlepsze kupony na podstawie:
+- procentu wystąpień liczb,
+- częstotliwości par,
+- częstotliwości trójek,
+- balansu parzyste/nieparzyste,
+- balansu niskie/wysokie,
+- rozstrzału,
+- podobieństwa do ostatnich losowań.
+
+**👑 Premium**  
+To najmocniejszy tryb aplikacji. Łączy jednocześnie:
+- HOT/COLD,
+- HOT MAX,
+- zestaw różnic pozycyjnych,
+- Turbo Score,
+- dodatkowe mutacje kandydatów.  
+Na końcu wybiera topowe kupony premium z najwyższą punktacją.
+
+**🧠 Tryb inteligentny**  
+Dodatkowe filtry ograniczające mało pożądane układy, np. za dużo kolejnych liczb.
+        """)
 
 
 # =========================================================
@@ -847,7 +1370,7 @@ def main():
 
     st.title(APP_TITLE)
     st.write("Generator typowań Lotto na bazie historii losowań z pliku **wyniki.pdf** (1–49, typuje 6 liczb).")
-    st.caption("Grupy gorące i zimne są teraz liczone wyłącznie wg procentu wystąpień liczb w losowaniach z wybranego zakresu bazy.")
+    st.caption("Dodano tryb Premium 👑, który łączy wszystkie najmocniejsze funkcje generatora.")
 
     if "last_records" not in st.session_state:
         st.session_state["last_records"] = []
@@ -861,6 +1384,10 @@ def main():
         st.session_state["difference_set"] = None
     if "hot_max_set" not in st.session_state:
         st.session_state["hot_max_set"] = None
+    if "turbo_score_result" not in st.session_state:
+        st.session_state["turbo_score_result"] = None
+    if "premium_result" not in st.session_state:
+        st.session_state["premium_result"] = None
 
     pdf_path = Path(os.getcwd()) / PDF_FILENAME
 
@@ -874,6 +1401,8 @@ def main():
         unsafe_allow_html=True
     )
     st.markdown("</div>", unsafe_allow_html=True)
+
+    render_feature_descriptions()
 
     if not pdf_path.exists():
         st.error(f"❌ Nie znaleziono `{PDF_FILENAME}` obok `app.py`.")
@@ -898,6 +1427,10 @@ def main():
         "preview_limit": 60,
         "hot_max_enabled": False,
         "hot_max_count_idx": 5,
+        "turbo_candidate_idx": 3,
+        "turbo_top_idx": 2,
+        "premium_candidate_idx": 2,
+        "premium_top_idx": 2,
         "smart_enabled": False,
         "block_run_2": True,
         "block_run_3": True,
@@ -945,6 +1478,10 @@ def main():
         st.write(f"**Analiza różnic pozycyjnych:** ostatnie **{cfg['difference_window']}** losowań")
         st.write(f"**HOT MAX 6:** {'TAK' if cfg['hot_max_enabled'] else 'NIE'}")
         st.write(f"**Liczb z HOT MAX:** {cfg['hot_max_count']}")
+        st.write(f"**Turbo Score — kandydaci:** {cfg['turbo_candidate_count']}")
+        st.write(f"**Turbo Score — TOP:** {cfg['turbo_top_n']}")
+        st.write(f"**Premium — kandydaci:** {cfg['premium_candidate_count']}")
+        st.write(f"**Premium — TOP:** {cfg['premium_top_n']}")
         st.write(f"**Tryb inteligentny:** {'TAK' if cfg['smart_enabled'] else 'NIE'}")
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -953,7 +1490,7 @@ def main():
     st.markdown('<div class="v-card">', unsafe_allow_html=True)
     st.subheader("🎟️ Generator")
 
-    col_btn1, col_btn2, col_btn3, col_btn4, col_btn5 = st.columns(5, gap="large")
+    col_btn1, col_btn2, col_btn3, col_btn4, col_btn5, col_btn6, col_btn7 = st.columns(7, gap="large")
     with col_btn1:
         generate = st.button("🏆 GENERUJ KUPONY", type="primary", use_container_width=True)
     with col_btn2:
@@ -964,6 +1501,10 @@ def main():
         show_hot_set = st.button("🔥 ZESTAW 6 HOT", type="primary", use_container_width=True)
     with col_btn5:
         build_diff_set = st.button("📐 ZESTAW RÓŻNIC", type="primary", use_container_width=True)
+    with col_btn6:
+        build_turbo = st.button("⭐ TURBO SCORE", type="primary", use_container_width=True)
+    with col_btn7:
+        build_premium = st.button("👑 PREMIUM", type="primary", use_container_width=True)
 
     if show_res:
         st.session_state["show_results"] = not st.session_state["show_results"]
@@ -982,6 +1523,8 @@ def main():
         base_mode_kind = "hot"
     elif mode_ui == "Tylko ❄️ zimne":
         base_mode_kind = "cold"
+    elif mode_ui == "Premium 👑":
+        base_mode_kind = "premium"
     else:
         base_mode_kind = "mix"
 
@@ -991,7 +1534,45 @@ def main():
         cfg["hot_max_count"] == 6
     )
 
+    if build_turbo:
+        turbo_result = build_turbo_score_ranking(
+            draws_for_window=draws,
+            hot=hot,
+            cold=cold,
+            base_mode_kind="hybrid" if base_mode_kind == "premium" else base_mode_kind,
+            mix_hot_count=cfg["mix_hot_count"],
+            candidate_count=cfg["turbo_candidate_count"],
+            top_n=cfg["turbo_top_n"]
+        )
+        st.session_state["turbo_score_result"] = turbo_result
+
+    if build_premium or base_mode_kind == "premium":
+        premium_result = build_premium_ranking(
+            draws_for_window=draws,
+            hot=hot,
+            cold=cold,
+            mix_hot_count=cfg["mix_hot_count"],
+            candidate_count=cfg["premium_candidate_count"],
+            top_n=cfg["premium_top_n"]
+        )
+        st.session_state["premium_result"] = premium_result
+
     def gen_one_record() -> Dict:
+        if base_mode_kind == "premium":
+            premium_result_local = build_premium_ranking(
+                draws_for_window=draws,
+                hot=hot,
+                cold=cold,
+                mix_hot_count=cfg["mix_hot_count"],
+                candidate_count=cfg["premium_candidate_count"],
+                top_n=max(3, min(cfg["premium_top_n"], 10))
+            )
+            best_row = premium_result_local["rows"][0]
+            return {
+                "Typ": "premium",
+                "Kupon": [int(x) for x in best_row["Kupon"].split()]
+            }
+
         if hot_max_mode_active:
             hot_max_set, hot_max_table = gen_ticket_hot_max_percent(draws)
             return {
@@ -1014,7 +1595,28 @@ def main():
         status = st.empty()
 
         with st.spinner("Generuję kupony..."):
-            if hot_max_mode_active:
+            if base_mode_kind == "premium":
+                premium_result_local = build_premium_ranking(
+                    draws_for_window=draws,
+                    hot=hot,
+                    cold=cold,
+                    mix_hot_count=cfg["mix_hot_count"],
+                    candidate_count=cfg["premium_candidate_count"],
+                    top_n=cfg["premium_top_n"]
+                )
+                st.session_state["premium_result"] = premium_result_local
+                premium_rows = premium_result_local["rows"]
+
+                recs = []
+                total = min(int(cfg["n_tickets"]), len(premium_rows))
+                for i in range(total):
+                    recs.append({
+                        "Typ": "premium",
+                        "Kupon": [int(x) for x in premium_rows[i]["Kupon"].split()]
+                    })
+                    progress.progress(int((i + 1) / total * 100))
+                    status.write(f"Postęp: {i+1}/{total}")
+            elif hot_max_mode_active:
                 hot_max_set, hot_max_table = gen_ticket_hot_max_percent(draws)
                 recs = []
                 total = int(cfg["n_tickets"])
@@ -1034,7 +1636,7 @@ def main():
                 }
             else:
                 if not cfg["smart_enabled"]:
-                    recs: List[Dict] = []
+                    recs = []
                     total = int(cfg["n_tickets"])
                     for i in range(total):
                         recs.append(gen_one_record())
@@ -1060,7 +1662,7 @@ def main():
         progress.empty()
         status.empty()
 
-        if cfg["smart_enabled"] and (not hot_max_mode_active) and len(recs) < int(cfg["n_tickets"]):
+        if cfg["smart_enabled"] and (not hot_max_mode_active) and base_mode_kind != "premium" and len(recs) < int(cfg["n_tickets"]):
             st.warning(
                 f"⚠️ Filtry są ostre: wygenerowano **{len(recs)}** / {int(cfg['n_tickets'])} kuponów. "
                 "Poluzuj filtry albo zwiększ limit prób."
@@ -1189,6 +1791,95 @@ def main():
             use_container_width=True
         )
 
+    if st.session_state.get("turbo_score_result") is not None:
+        turbo = st.session_state["turbo_score_result"]
+        turbo_df = pd.DataFrame(turbo["rows"])
+
+        st.markdown("### ⭐ Turbo Score — ranking kuponów")
+        st.markdown(
+            f'<div class="v-row"><b>Turbo Score</b> — oceniono {turbo["candidate_count_used"]} kandydatów '
+            f'i wybrano TOP {len(turbo["rows"])}</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown("#### Najlepsze kupony według punktacji")
+        st.dataframe(turbo_df, use_container_width=True, hide_index=True)
+
+        profile = turbo["target_profile"]
+        st.markdown("#### Profil docelowy wyliczony z bazy")
+        st.markdown(
+            f"""
+<div class="v-row">
+<b>Balans parzyste/nieparzyste:</b> {profile["target_even_odd"][0]}/{profile["target_even_odd"][1]} |
+<b>Balans niskie/wysokie:</b> {profile["target_low_high"][0]}/{profile["target_low_high"][1]} |
+<b>Średni rozstrzał:</b> {profile["target_spread"]:.2f} |
+<b>Średnia liczba par kolejnych:</b> {profile["target_pairs"]:.2f}
+</div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        turbo_filename_input = st.text_input("Nazwa pliku Turbo Score .txt", value="turbo_score.txt")
+        safe_turbo_name = sanitize_txt_filename(turbo_filename_input)
+        st.download_button(
+            "⬇️ Pobierz ranking Turbo Score jako TXT",
+            data=make_txt_for_turbo_score(turbo["rows"], turbo["candidate_count_used"]),
+            file_name=safe_turbo_name,
+            mime="text/plain",
+            use_container_width=True
+        )
+
+    if st.session_state.get("premium_result") is not None:
+        premium = st.session_state["premium_result"]
+        premium_df = pd.DataFrame(premium["rows"])
+
+        st.markdown("### 👑 Premium — ranking końcowy")
+        st.markdown(
+            f'<div class="v-row-premium"><b>Premium Mode</b> — oceniono {premium["candidate_count_used"]} kandydatów '
+            f'i wybrano TOP {len(premium["rows"])}</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown("#### Najlepsze kupony premium")
+        st.dataframe(premium_df, use_container_width=True, hide_index=True)
+
+        hot_max_str = " ".join(f"{x:02d}" for x in premium["hot_max_set"])
+        diff_str = " ".join(f"{x:02d}" for x in premium["diff_set"])
+        st.markdown(
+            f"""
+<div class="v-row-premium">
+<b>Źródła premium:</b><br>
+HOT MAX 6: {hot_max_str}<br>
+Zestaw różnic: {diff_str}
+</div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        profile = premium["target_profile"]
+        st.markdown(
+            f"""
+<div class="v-row-premium">
+<b>Profil docelowy premium:</b><br>
+Parzyste/Nieparzyste: {profile["target_even_odd"][0]}/{profile["target_even_odd"][1]}<br>
+Niskie/Wysokie: {profile["target_low_high"][0]}/{profile["target_low_high"][1]}<br>
+Średni rozstrzał: {profile["target_spread"]:.2f}<br>
+Średnia liczba par kolejnych: {profile["target_pairs"]:.2f}
+</div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        premium_filename_input = st.text_input("Nazwa pliku Premium .txt", value="premium_mode.txt")
+        safe_premium_name = sanitize_txt_filename(premium_filename_input)
+        st.download_button(
+            "⬇️ Pobierz ranking Premium jako TXT",
+            data=make_txt_for_premium(premium["rows"], premium["candidate_count_used"]),
+            file_name=safe_premium_name,
+            mime="text/plain",
+            use_container_width=True
+        )
+
     if st.session_state.get("last_daily") is not None:
         info = st.session_state["last_daily"]
         daily_set = info["set"]
@@ -1238,8 +1929,9 @@ def main():
             t = [int(x) for x in nums_str.split()]
             ev, od = even_odd_split(t)
             pairs = count_adjacent_pairs(sorted(t))
+            row_class = "v-row-premium" if typ == "premium" else "v-row"
             st.markdown(
-                f'<div class="v-row"><b>Kupon #{i+1:03d}</b> '
+                f'<div class="{row_class}"><b>Kupon #{i+1:03d}</b> '
                 f'<span class="v-muted">[{typ}]</span> — {nums_str} '
                 f'<span class="v-muted"> | parzyste/nieparzyste: {ev}/{od} | pary: {pairs}</span></div>',
                 unsafe_allow_html=True
