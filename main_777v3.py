@@ -7,33 +7,16 @@ from itertools import combinations
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 
+import fitz
+import numpy as np
 import pandas as pd
 import streamlit as st
-
-# =========================================================
-# PDF ENGINES
-# =========================================================
-try:
-    import fitz  # PyMuPDF
-    HAS_PYMUPDF = True
-except Exception:
-    HAS_PYMUPDF = False
-
-try:
-    from pypdf import PdfReader
-    from pypdf.errors import PdfReadError
-    HAS_PYPDF = True
-except Exception:
-    HAS_PYPDF = False
-    PdfReader = None
-    PdfReadError = Exception
-
 
 # =========================================================
 # APP CONFIG
 # =========================================================
 APP_TITLE = "🏆 Generator-Victory — Lotto 6/49"
-PDF_FILENAME = "wyniki.pdf"
+PDF_CANDIDATES = ["wyniki.pdf"]
 NUM_MIN = 1
 NUM_MAX = 49
 PICK_COUNT = 6
@@ -42,7 +25,6 @@ DRAWNO_MIN = 1000
 HYBRID_HOT_P = 0.70
 HYBRID_COLD_P = 0.20
 HYBRID_MIX_P = 0.10
-
 
 # =========================================================
 # UI STYLE
@@ -59,6 +41,8 @@ LIGHT_GREEN_CSS = """
   --green:#00a86b;
   --green2:#00c27a;
   --gold:#d4af37;
+  --blue:#2d77d1;
+  --danger:#cf3b3b;
   --border: rgba(0,168,107,0.22);
   --shadow: 0 10px 28px rgba(0,0,0,.08);
 }
@@ -120,6 +104,28 @@ LIGHT_GREEN_CSS = """
   color: #000000 !important;
 }
 
+.v-pill-blue{
+  display:inline-block;
+  padding: 6px 10px;
+  margin: 3px 4px 0 0;
+  border-radius: 999px;
+  border: 1px solid rgba(45, 119, 209, 0.40);
+  background: rgba(45, 119, 209, 0.12);
+  font-weight: 900;
+  color: #000000 !important;
+}
+
+.v-pill-danger{
+  display:inline-block;
+  padding: 6px 10px;
+  margin: 3px 4px 0 0;
+  border-radius: 999px;
+  border: 1px solid rgba(207, 59, 59, 0.40);
+  background: rgba(207, 59, 59, 0.12);
+  font-weight: 900;
+  color: #000000 !important;
+}
+
 .v-muted{
   opacity: .86;
   font-size: .92rem;
@@ -138,6 +144,24 @@ LIGHT_GREEN_CSS = """
 .v-row-premium{
   background: rgba(212, 175, 55, 0.10);
   border: 1px solid rgba(212, 175, 55, 0.34);
+  border-radius: 14px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  color: #000000 !important;
+}
+
+.v-row-blue{
+  background: rgba(45, 119, 209, 0.08);
+  border: 1px solid rgba(45, 119, 209, 0.24);
+  border-radius: 14px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  color: #000000 !important;
+}
+
+.v-row-danger{
+  background: rgba(207, 59, 59, 0.08);
+  border: 1px solid rgba(207, 59, 59, 0.24);
   border-radius: 14px;
   padding: 10px 12px;
   margin: 8px 0;
@@ -183,23 +207,79 @@ button[kind="header"]{
 </style>
 """
 
+# =========================================================
+# HELPERS
+# =========================================================
+INT_RE = re.compile(r"\d+")
+
+
+def resolve_pdf_path() -> Path:
+    cwd = Path(os.getcwd())
+    for name in PDF_CANDIDATES:
+        p = cwd / name
+        if p.exists():
+            return p
+    return cwd / PDF_CANDIDATES[0]
+
+
+def sanitize_txt_filename(name: str) -> str:
+    name = (name or "").strip()
+    if not name:
+        name = "wyniki.txt"
+    name = name.replace("\\", "_").replace("/", "_").replace("..", "_")
+    if not name.lower().endswith(".txt"):
+        name += ".txt"
+    return name
+
+
+def even_odd_split(nums: List[int]) -> Tuple[int, int]:
+    ev = sum(1 for n in nums if n % 2 == 0)
+    od = len(nums) - ev
+    return ev, od
+
+
+def count_adjacent_pairs(nums_sorted: List[int]) -> int:
+    return sum(1 for a, b in zip(nums_sorted, nums_sorted[1:]) if b == a + 1)
+
+
+def has_run_length(nums_sorted: List[int], run_len: int) -> bool:
+    if run_len <= 1:
+        return True
+    run = 1
+    for a, b in zip(nums_sorted, nums_sorted[1:]):
+        if b == a + 1:
+            run += 1
+            if run >= run_len:
+                return True
+        else:
+            run = 1
+    return False
+
+
+def pick_unique(pool: List[int], k: int) -> List[int]:
+    pool = list(dict.fromkeys(pool))
+    if len(pool) < k:
+        raise ValueError("Za mało liczb w puli, aby wylosować unikalny zestaw.")
+    return sorted(random.sample(pool, k))
+
+
+def clamp(value: int, low: int, high: int) -> int:
+    return max(low, min(high, value))
+
 
 # =========================================================
 # PDF PARSING
 # =========================================================
-INT_RE = re.compile(r"\d+")
-
 def _validate_pdf_bytes(pdf_bytes: bytes) -> None:
     if not pdf_bytes.startswith(b"%PDF"):
         head = pdf_bytes[:240].decode("utf-8", errors="replace")
         raise ValueError(
-            "Plik 'wyniki.pdf' nie wygląda jak prawdziwy PDF (brak nagłówka %PDF).\n"
+            "Plik PDF nie wygląda jak prawdziwy PDF (brak nagłówka %PDF).\n"
             f"Początek pliku:\n{head}"
         )
 
+
 def _read_pdf_pages_text_pymupdf(pdf_bytes: bytes) -> List[str]:
-    if not HAS_PYMUPDF:
-        raise RuntimeError("PyMuPDF not available")
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     pages = []
     for page in doc:
@@ -207,20 +287,6 @@ def _read_pdf_pages_text_pymupdf(pdf_bytes: bytes) -> List[str]:
     doc.close()
     return pages
 
-def _read_pdf_pages_text_pypdf(pdf_bytes: bytes) -> List[str]:
-    if not HAS_PYPDF:
-        raise RuntimeError("pypdf not available")
-    try:
-        reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
-    except Exception as e:
-        raise PdfReadError(str(e))
-    pages = []
-    for page in reader.pages:
-        try:
-            pages.append(page.extract_text() or "")
-        except Exception:
-            pages.append("")
-    return pages
 
 def _extract_tokens_and_drawnos_from_page(page_text: str) -> Tuple[List[int], List[int]]:
     tokens: List[int] = []
@@ -257,6 +323,7 @@ def _extract_tokens_and_drawnos_from_page(page_text: str) -> Tuple[List[int], Li
 
     return tokens, drawnos
 
+
 def _chunk_tokens_to_draws(tokens: List[int]) -> List[List[int]]:
     if len(tokens) < PICK_COUNT:
         return []
@@ -288,6 +355,7 @@ def _chunk_tokens_to_draws(tokens: List[int]) -> List[List[int]]:
             best = draws
     return best
 
+
 def _pair_draws_with_drawnos(draws: List[List[int]], drawnos: List[int]) -> List[Dict]:
     n = min(len(draws), len(drawnos))
     records: List[Dict] = []
@@ -314,31 +382,11 @@ def _pair_draws_with_drawnos(draws: List[List[int]], drawnos: List[int]) -> List
 
     return records
 
+
 @st.cache_data(show_spinner=False)
 def load_records_cached(pdf_bytes: bytes) -> List[Dict]:
     _validate_pdf_bytes(pdf_bytes)
-
-    last_err = None
-    pages: List[str] = []
-
-    if HAS_PYMUPDF:
-        try:
-            pages = _read_pdf_pages_text_pymupdf(pdf_bytes)
-        except Exception as e:
-            last_err = e
-            pages = []
-
-    if not pages and HAS_PYPDF:
-        try:
-            pages = _read_pdf_pages_text_pypdf(pdf_bytes)
-        except Exception as e:
-            last_err = e
-            pages = []
-
-    if not pages:
-        if last_err:
-            raise RuntimeError(f"Nie udało się odczytać PDF. Ostatni błąd: {last_err}")
-        raise RuntimeError("Nie udało się odczytać PDF.")
+    pages = _read_pdf_pages_text_pymupdf(pdf_bytes)
 
     all_tokens: List[int] = []
     all_drawnos: List[int] = []
@@ -357,7 +405,7 @@ def load_records_cached(pdf_bytes: bytes) -> List[Dict]:
 
 
 # =========================================================
-# STATS & GROUPS — PERCENT-BASED HOT/COLD
+# STATS
 # =========================================================
 @st.cache_data(show_spinner=False)
 def compute_presence_percent_df_cached(draws: List[List[int]]) -> pd.DataFrame:
@@ -385,25 +433,86 @@ def compute_presence_percent_df_cached(draws: List[List[int]]) -> pd.DataFrame:
     ).reset_index(drop=True)
     return df
 
+
 def build_groups_from_percent(percent_df: pd.DataFrame, hot_size: int, cold_size: int) -> Tuple[List[int], List[int], List[int]]:
     hot = percent_df.head(hot_size)["Liczba"].tolist()
     cold = percent_df.tail(cold_size)["Liczba"].tolist()
     neutral = [n for n in range(NUM_MIN, NUM_MAX + 1) if n not in hot and n not in cold]
     return hot, cold, neutral
 
+
 def build_hot_master_set(percent_df: pd.DataFrame) -> List[int]:
     return sorted(percent_df.head(PICK_COUNT)["Liczba"].tolist())
+
+
+@st.cache_data(show_spinner=False)
+def compute_pair_triple_stats_cached(draws: List[List[int]]) -> Tuple[Counter, Counter]:
+    pair_counter = Counter()
+    triple_counter = Counter()
+
+    for draw in draws:
+        sdraw = sorted(draw)
+        for pair in combinations(sdraw, 2):
+            pair_counter[pair] += 1
+        for triple in combinations(sdraw, 3):
+            triple_counter[triple] += 1
+
+    return pair_counter, triple_counter
+
+
+def build_target_profile(draws: List[List[int]]) -> Dict:
+    spreads = [(max(d) - min(d)) for d in draws if d]
+    pair_counts = [count_adjacent_pairs(sorted(d)) for d in draws if d]
+
+    even_odd_counter = Counter()
+    low_high_counter = Counter()
+
+    for d in draws:
+        s = sorted(d)
+        ev, od = even_odd_split(s)
+        even_odd_counter[(ev, od)] += 1
+
+        low = sum(1 for x in s if x <= 24)
+        high = len(s) - low
+        low_high_counter[(low, high)] += 1
+
+    target_even_odd = even_odd_counter.most_common(1)[0][0] if even_odd_counter else (3, 3)
+    target_low_high = low_high_counter.most_common(1)[0][0] if low_high_counter else (3, 3)
+    target_spread = sum(spreads) / len(spreads) if spreads else 0.0
+    target_pairs = sum(pair_counts) / len(pair_counts) if pair_counts else 0.0
+
+    return {
+        "target_even_odd": target_even_odd,
+        "target_low_high": target_low_high,
+        "target_spread": target_spread,
+        "target_pairs": target_pairs,
+    }
+
+
+# =========================================================
+# HEATMAP
+# =========================================================
+def build_heatmap_df(percent_df: pd.DataFrame, columns_per_row: int = 7) -> pd.DataFrame:
+    values = dict(zip(percent_df["Liczba"], percent_df["Procent_losowan"]))
+    rows = []
+    current = []
+    for n in range(NUM_MIN, NUM_MAX + 1):
+        current.append(f"{n:02d}\n{values.get(n, 0.0):.2f}%")
+        if len(current) == columns_per_row:
+            rows.append(current)
+            current = []
+    if current:
+        while len(current) < columns_per_row:
+            current.append("")
+        rows.append(current)
+
+    col_names = [f"C{i+1}" for i in range(columns_per_row)]
+    return pd.DataFrame(rows, columns=col_names)
 
 
 # =========================================================
 # GENERATION
 # =========================================================
-def pick_unique(pool: List[int], k: int) -> List[int]:
-    pool = list(dict.fromkeys(pool))
-    if len(pool) < k:
-        raise ValueError("Za mało liczb w puli, aby wylosować unikalny zestaw.")
-    return sorted(random.sample(pool, k))
-
 def gen_ticket(mode: str, hot: List[int], cold: List[int], mix_hot_count: int) -> List[int]:
     if mode == "hot":
         return pick_unique(hot, PICK_COUNT)
@@ -419,6 +528,7 @@ def gen_ticket(mode: str, hot: List[int], cold: List[int], mix_hot_count: int) -
         return sorted(h + c)
     raise ValueError("Nieznany tryb losowania.")
 
+
 def gen_ticket_hot_max_percent(draws_for_window: List[List[int]]) -> Tuple[List[int], pd.DataFrame]:
     pct_df = compute_presence_percent_df_cached(draws_for_window)
     top6 = pct_df.head(PICK_COUNT).copy()
@@ -429,27 +539,6 @@ def gen_ticket_hot_max_percent(draws_for_window: List[List[int]]) -> Tuple[List[
 # =========================================================
 # SMART MODE
 # =========================================================
-def count_adjacent_pairs(nums_sorted: List[int]) -> int:
-    return sum(1 for a, b in zip(nums_sorted, nums_sorted[1:]) if b == a + 1)
-
-def has_run_length(nums_sorted: List[int], run_len: int) -> bool:
-    if run_len <= 1:
-        return True
-    run = 1
-    for a, b in zip(nums_sorted, nums_sorted[1:]):
-        if b == a + 1:
-            run += 1
-            if run >= run_len:
-                return True
-        else:
-            run = 1
-    return False
-
-def even_odd_split(nums: List[int]) -> Tuple[int, int]:
-    ev = sum(1 for n in nums if n % 2 == 0)
-    od = len(nums) - ev
-    return ev, od
-
 def smart_ok(
     ticket: List[int],
     block_run_2: bool,
@@ -479,6 +568,7 @@ def smart_ok(
 
     return True
 
+
 def generate_with_smart_filters(
     gen_func,
     n_tickets: int,
@@ -503,6 +593,7 @@ def generate_with_smart_filters(
 def flatten_last_n(draws: List[List[int]], n: int) -> List[int]:
     return [x for d in draws[:n] for x in d]
 
+
 def parity_bias_from_last_n(draws: List[List[int]], n: int) -> str:
     nums = flatten_last_n(draws, n)
     ev = sum(1 for x in nums if x % 2 == 0)
@@ -512,6 +603,7 @@ def parity_bias_from_last_n(draws: List[List[int]], n: int) -> str:
     if od > ev:
         return "EVEN"
     return "ANY"
+
 
 def high_low_bias_from_last_two(draws: List[List[int]], threshold: int) -> str:
     if len(draws) < 2:
@@ -526,9 +618,11 @@ def high_low_bias_from_last_two(draws: List[List[int]], threshold: int) -> str:
         return "LOW"
     return "ANY"
 
+
 def avg_spread_last_n(draws: List[List[int]], n: int) -> float:
     spreads = [(max(d) - min(d)) for d in draws[:n] if d]
     return sum(spreads) / len(spreads) if spreads else 0.0
+
 
 def pick_daily_set_from_hot(
     hot: List[int],
@@ -593,6 +687,7 @@ def _choose_candidate_from_diffs(base_value: int, diff_counter: Counter, used: s
         if nmin <= candidate <= nmax and candidate not in used:
             return candidate
     return None
+
 
 def build_positional_difference_set(draws: List[List[int]], window: int) -> Dict:
     if not draws:
@@ -673,55 +768,14 @@ def build_positional_difference_set(draws: List[List[int]], window: int) -> Dict
 
 
 # =========================================================
-# TURBO SCORE / RANKING KUPONÓW
+# TURBO SCORE
 # =========================================================
-@st.cache_data(show_spinner=False)
-def compute_pair_triple_stats_cached(draws: List[List[int]]) -> Tuple[Counter, Counter]:
-    pair_counter = Counter()
-    triple_counter = Counter()
-
-    for draw in draws:
-        sdraw = sorted(draw)
-        for pair in combinations(sdraw, 2):
-            pair_counter[pair] += 1
-        for triple in combinations(sdraw, 3):
-            triple_counter[triple] += 1
-
-    return pair_counter, triple_counter
-
-def build_target_profile(draws: List[List[int]]) -> Dict:
-    spreads = [(max(d) - min(d)) for d in draws if d]
-    pair_counts = [count_adjacent_pairs(sorted(d)) for d in draws if d]
-
-    even_odd_counter = Counter()
-    low_high_counter = Counter()
-
-    for d in draws:
-        s = sorted(d)
-        ev, od = even_odd_split(s)
-        even_odd_counter[(ev, od)] += 1
-
-        low = sum(1 for x in s if x <= 24)
-        high = len(s) - low
-        low_high_counter[(low, high)] += 1
-
-    target_even_odd = even_odd_counter.most_common(1)[0][0] if even_odd_counter else (3, 3)
-    target_low_high = low_high_counter.most_common(1)[0][0] if low_high_counter else (3, 3)
-    target_spread = sum(spreads) / len(spreads) if spreads else 0.0
-    target_pairs = sum(pair_counts) / len(pair_counts) if pair_counts else 0.0
-
-    return {
-        "target_even_odd": target_even_odd,
-        "target_low_high": target_low_high,
-        "target_spread": target_spread,
-        "target_pairs": target_pairs,
-    }
-
 def similarity_to_recent(ticket: List[int], recent_draws: List[List[int]]) -> int:
     tset = set(ticket)
     if not recent_draws:
         return 0
     return max(len(tset.intersection(set(d))) for d in recent_draws)
+
 
 def score_ticket(
     ticket: List[int],
@@ -734,7 +788,6 @@ def score_ticket(
     sticket = sorted(ticket)
 
     number_score = sum(percent_map.get(n, 0.0) for n in sticket)
-
     pair_score_raw = sum(pair_counter.get(tuple(pair), 0) for pair in combinations(sticket, 2))
     triple_score_raw = sum(triple_counter.get(tuple(triple), 0) for triple in combinations(sticket, 3))
 
@@ -781,6 +834,7 @@ def score_ticket(
         "final_score": final_score,
     }
 
+
 def generate_candidate_tickets(
     count_candidates: int,
     base_mode_kind: str,
@@ -810,6 +864,7 @@ def generate_candidate_tickets(
             uniq.append(sorted(t))
 
     return uniq
+
 
 def build_turbo_score_ranking(
     draws_for_window: List[List[int]],
@@ -891,6 +946,7 @@ def mutate_ticket(ticket: List[int], source_pool: List[int], replace_count: int)
     added = random.sample(available, need)
     return sorted(kept + added)
 
+
 def build_premium_ranking(
     draws_for_window: List[List[int]],
     hot: List[int],
@@ -909,11 +965,6 @@ def build_premium_ranking(
     diff_data = build_positional_difference_set(draws_for_window, min(999, len(draws_for_window)))
     diff_set = diff_data["set"]
 
-    # baza kandydatów premium z wielu źródeł
-    seed_candidates = []
-    seed_candidates.append(sorted(hot_max_set))
-    seed_candidates.append(sorted(diff_set))
-
     turbo_seed = build_turbo_score_ranking(
         draws_for_window=draws_for_window,
         hot=hot,
@@ -923,10 +974,14 @@ def build_premium_ranking(
         candidate_count=max(100, candidate_count // 2),
         top_n=min(10, top_n * 2)
     )
+
+    seed_candidates = []
+    seed_candidates.append(sorted(hot_max_set))
+    seed_candidates.append(sorted(diff_set))
+
     for row in turbo_seed["rows"]:
         seed_candidates.append(sorted([int(x) for x in row["Kupon"].split()]))
 
-    # kandydaci zwykli
     ordinary_candidates = generate_candidate_tickets(
         count_candidates=max(candidate_count, 200),
         base_mode_kind="hybrid",
@@ -936,7 +991,6 @@ def build_premium_ranking(
     )
     seed_candidates.extend(ordinary_candidates)
 
-    # mutacje premium
     source_pool = list(dict.fromkeys(hot + hot_max_set + diff_set + list(range(NUM_MIN, NUM_MAX + 1))))
     mutated = []
     for cand in seed_candidates[:min(len(seed_candidates), candidate_count)]:
@@ -954,11 +1008,11 @@ def build_premium_ranking(
             seen.add(key)
             uniq.append(sorted(t))
 
-    premium_scored = []
-
     hot_max_set_ref = set(hot_max_set)
     diff_set_ref = set(diff_set)
     hot_ref = set(hot)
+
+    premium_scored = []
 
     for ticket in uniq:
         base = score_ticket(
@@ -1024,23 +1078,303 @@ def build_premium_ranking(
 
 
 # =========================================================
-# TXT EXPORT
+# AI SIMULATION
 # =========================================================
-def sanitize_txt_filename(name: str) -> str:
-    name = (name or "").strip()
-    if not name:
-        name = "wyniki.txt"
-    name = name.replace("\\", "_").replace("/", "_").replace("..", "_")
-    if not name.lower().endswith(".txt"):
-        name += ".txt"
-    return name
+def weighted_sample_without_replacement(population: np.ndarray, weights: np.ndarray, k: int, rng: np.random.Generator) -> List[int]:
+    probs = weights / weights.sum()
+    chosen = rng.choice(population, size=k, replace=False, p=probs)
+    return sorted(chosen.tolist())
 
+
+@st.cache_data(show_spinner=False)
+def run_ai_simulation_cached(percent_df: pd.DataFrame, n_sims: int) -> Dict:
+    rng = np.random.default_rng(12345)
+
+    population = np.array(percent_df["Liczba"].tolist(), dtype=int)
+    weights = np.array(percent_df["Procent_losowan"].tolist(), dtype=float) + 0.01
+
+    number_occ = Counter()
+    pair_occ = Counter()
+
+    for _ in range(n_sims):
+        draw = weighted_sample_without_replacement(population, weights, PICK_COUNT, rng)
+
+        for n in draw:
+            number_occ[n] += 1
+
+        for pair in combinations(draw, 2):
+            pair_occ[pair] += 1
+
+    sim_df = pd.DataFrame(
+        [{"Liczba": n, "Symulacje_wystapien": number_occ.get(n, 0)} for n in range(NUM_MIN, NUM_MAX + 1)]
+    ).sort_values(["Symulacje_wystapien", "Liczba"], ascending=[False, True]).reset_index(drop=True)
+
+    sim_set = sorted(sim_df.head(PICK_COUNT)["Liczba"].tolist())
+
+    top_pairs = pd.DataFrame(
+        [{"Para": f"{a:02d}-{b:02d}", "Wystąpienia": c} for (a, b), c in pair_occ.most_common(15)]
+    )
+
+    return {
+        "sim_df": sim_df,
+        "sim_set": sim_set,
+        "top_pairs": top_pairs,
+        "n_sims": n_sims
+    }
+
+
+# =========================================================
+# CYCLE DETECTION
+# =========================================================
+@st.cache_data(show_spinner=False)
+def detect_cycles_cached(draws: List[List[int]]) -> pd.DataFrame:
+    chronological = list(reversed(draws))
+    total = len(chronological)
+    rows = []
+
+    for num in range(NUM_MIN, NUM_MAX + 1):
+        positions = []
+        for idx, draw in enumerate(chronological):
+            if num in draw:
+                positions.append(idx)
+
+        occurrences = len(positions)
+
+        if occurrences >= 2:
+            gaps = [b - a for a, b in zip(positions[:-1], positions[1:])]
+            avg_gap = float(sum(gaps) / len(gaps))
+            last_gap = float((total - 1) - positions[-1])
+            cycle_ratio = (last_gap / avg_gap) if avg_gap > 0 else 0.0
+        elif occurrences == 1:
+            avg_gap = 0.0
+            last_gap = float((total - 1) - positions[-1])
+            cycle_ratio = 0.0
+        else:
+            avg_gap = 0.0
+            last_gap = float(total)
+            cycle_ratio = 0.0
+
+        rows.append({
+            "Liczba": num,
+            "Wystąpienia": occurrences,
+            "Średni_cykl": round(avg_gap, 2),
+            "Aktualna_przerwa": round(last_gap, 2),
+            "Cycle_Ratio": round(cycle_ratio, 3)
+        })
+
+    df = pd.DataFrame(rows).sort_values(
+        ["Cycle_Ratio", "Wystąpienia", "Liczba"],
+        ascending=[False, False, True]
+    ).reset_index(drop=True)
+
+    return df
+
+
+# =========================================================
+# WIELKA SZANSA — NOWA FUNKCJA
+# =========================================================
+def _series_for_position(draws_newest_first: List[List[int]], pos_idx: int, window: int) -> List[int]:
+    subset = draws_newest_first[:min(window, len(draws_newest_first))]
+    chronological = list(reversed(subset))
+    return [row[pos_idx] for row in chronological if len(row) == PICK_COUNT]
+
+
+def _linear_projection(series: List[int], recent_points: int = 8) -> float:
+    if len(series) < 2:
+        return float(series[-1]) if series else 1.0
+
+    use = series[-min(recent_points, len(series)):]
+    x = np.arange(len(use), dtype=float)
+    y = np.array(use, dtype=float)
+
+    if len(use) == 1:
+        return float(use[-1])
+
+    a, b = np.polyfit(x, y, 1)
+    return float(a * len(use) + b)
+
+
+def _recent_delta_projection(series: List[int], max_deltas: int = 6) -> float:
+    if len(series) < 2:
+        return float(series[-1]) if series else 1.0
+
+    deltas = np.diff(series)
+    if len(deltas) == 0:
+        return float(series[-1])
+
+    recent = deltas[-min(max_deltas, len(deltas)):]
+    weights = np.linspace(1.0, 2.2, len(recent))
+    step = float(np.average(recent, weights=weights))
+    return float(series[-1] + step)
+
+
+def _curvature_projection(series: List[int], max_points: int = 8) -> float:
+    if len(series) < 3:
+        return _recent_delta_projection(series)
+
+    use = series[-min(max_points, len(series)):]
+    x = np.arange(len(use), dtype=float)
+    y = np.array(use, dtype=float)
+
+    if len(use) < 3:
+        return _recent_delta_projection(series)
+
+    coeff = np.polyfit(x, y, 2)
+    poly = np.poly1d(coeff)
+    return float(poly(len(use)))
+
+
+def _normalized_step_pattern(series: List[int], step_len: int = 4) -> Optional[Tuple[int, ...]]:
+    if len(series) < step_len + 1:
+        return None
+    deltas = np.diff(series[-(step_len + 1):])
+    clipped = [int(np.clip(round(d), -6, 6)) for d in deltas]
+    return tuple(clipped)
+
+
+def _pattern_match_projection(series: List[int], nmin: int, nmax: int, step_len: int = 4) -> Optional[float]:
+    if len(series) < step_len + 6:
+        return None
+
+    target = _normalized_step_pattern(series, step_len=step_len)
+    if target is None:
+        return None
+
+    candidates = []
+    for end_idx in range(step_len, len(series) - 1):
+        past = series[:end_idx + 1]
+        patt = _normalized_step_pattern(past, step_len=step_len)
+        if patt is None:
+            continue
+
+        distance = sum(abs(a - b) for a, b in zip(target, patt))
+        if distance <= 4:
+            candidates.append((distance, series[end_idx + 1]))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0])
+    best_vals = [v for _, v in candidates[:12]]
+    return float(sum(best_vals) / len(best_vals))
+
+
+def _smooth_prediction(preds: List[float], fallback: float) -> float:
+    clean = [p for p in preds if p is not None and not np.isnan(p)]
+    if not clean:
+        return fallback
+    return float(sum(clean) / len(clean))
+
+
+def _enforce_sorted_forecast(raw_values: List[int]) -> List[int]:
+    vals = raw_values[:]
+    vals[0] = clamp(vals[0], NUM_MIN, NUM_MAX - (PICK_COUNT - 1))
+
+    for i in range(1, PICK_COUNT):
+        low = vals[i - 1] + 1
+        high = NUM_MAX - (PICK_COUNT - 1 - i)
+        vals[i] = clamp(vals[i], low, high)
+
+    vals = sorted(vals)
+
+    fixed = []
+    for i, v in enumerate(vals):
+        low = NUM_MIN if i == 0 else fixed[-1] + 1
+        high = NUM_MAX - (PICK_COUNT - 1 - i)
+        fixed.append(clamp(v, low, high))
+
+    return fixed
+
+
+def _score_forecast_confidence(series: List[int], predicted: int) -> float:
+    if len(series) < 6:
+        return 0.0
+
+    last = series[-1]
+    deltas = np.diff(series[-8:]) if len(series) >= 8 else np.diff(series)
+    delta_std = float(np.std(deltas)) if len(deltas) > 0 else 0.0
+    step = abs(predicted - last)
+
+    base = 100.0
+    base -= delta_std * 8.0
+    base -= step * 2.2
+
+    unique_recent = len(set(series[-10:])) if len(series) >= 10 else len(set(series))
+    base += min(unique_recent, 10) * 0.8
+
+    return round(clamp(int(round(base)), 1, 99), 2)
+
+
+def build_wielka_szansa_set(draws_newest_first: List[List[int]], window: int) -> Dict:
+    use_window = min(window, len(draws_newest_first))
+    subset_newest = draws_newest_first[:use_window]
+
+    forecast = []
+    details = []
+
+    for pos in range(PICK_COUNT):
+        series = _series_for_position(subset_newest, pos, use_window)
+        if not series:
+            fallback = pos + 1
+            forecast.append(fallback)
+            details.append({
+                "Pozycja": pos + 1,
+                "Ostatnia wartość": fallback,
+                "Prognoza": fallback,
+                "Pewność %": 0.0,
+                "Metoda": "fallback"
+            })
+            continue
+
+        last_val = float(series[-1])
+        p1 = _linear_projection(series, recent_points=8)
+        p2 = _recent_delta_projection(series, max_deltas=6)
+        p3 = _curvature_projection(series, max_points=8)
+        p4 = _pattern_match_projection(series, NUM_MIN, NUM_MAX, step_len=4)
+
+        blended = _smooth_prediction([p1, p2, p3, p4], fallback=last_val)
+
+        pred = int(round(blended))
+        pred = clamp(pred, NUM_MIN, NUM_MAX)
+
+        confidence = _score_forecast_confidence(series, pred)
+
+        used_methods = ["linia", "delta", "krzywizna"]
+        if p4 is not None:
+            used_methods.append("wzorzec")
+
+        forecast.append(pred)
+        details.append({
+            "Pozycja": pos + 1,
+            "Ostatnia wartość": int(series[-1]),
+            "Prognoza": pred,
+            "Pewność %": confidence,
+            "Metoda": ", ".join(used_methods)
+        })
+
+    forecast = _enforce_sorted_forecast(forecast)
+
+    for i in range(PICK_COUNT):
+        details[i]["Prognoza_po_korekcie"] = forecast[i]
+
+    return {
+        "set": forecast,
+        "details": details,
+        "window_used": use_window,
+        "opis": "Prognoza dalszego przebiegu każdej pozycji 1–6 na podstawie trendu, delty, krzywizny i podobnych wzorców historycznych."
+    }
+
+
+# =========================================================
+# TXT EXPORTS
+# =========================================================
 def make_txt_for_tickets(records: List[Dict]) -> bytes:
     lines = []
     for i, r in enumerate(records, start=1):
         nums = " ".join(f"{x:02d}" for x in r["Kupon"])
         lines.append(f"{i:03d}. [{r['Typ']}] {nums}")
     return ("\n".join(lines) + "\n").encode("utf-8")
+
 
 def make_txt_for_results(result_records: List[Dict]) -> bytes:
     lines = []
@@ -1052,6 +1386,7 @@ def make_txt_for_results(result_records: List[Dict]) -> bytes:
         lines.append(f"Losowanie: {draw_str} | Data: {date_str} | Wynik: {nums}")
     return ("\n".join(lines) + "\n").encode("utf-8")
 
+
 def make_txt_for_hot_master_set(hot_master_set: List[int], history_window: int) -> bytes:
     nums = " ".join(f"{x:02d}" for x in hot_master_set)
     text = (
@@ -1060,6 +1395,7 @@ def make_txt_for_hot_master_set(hot_master_set: List[int], history_window: int) 
         f"Zestaw: {nums}\n"
     )
     return text.encode("utf-8")
+
 
 def make_txt_for_difference_set(diff_data: Dict, selected_window: int) -> bytes:
     nums = " ".join(f"{x:02d}" for x in diff_data["set"])
@@ -1081,6 +1417,7 @@ def make_txt_for_difference_set(diff_data: Dict, selected_window: int) -> bytes:
         )
     return ("\n".join(lines) + "\n").encode("utf-8")
 
+
 def make_txt_for_hot_max_set(hot_max_set: List[int], hot_max_table: pd.DataFrame, selected_window: int) -> bytes:
     nums = " ".join(f"{x:02d}" for x in hot_max_set)
     lines = [
@@ -1097,6 +1434,7 @@ def make_txt_for_hot_max_set(hot_max_set: List[int], hot_max_table: pd.DataFrame
             f"Procent: {float(row['Procent_losowan']):.2f}%"
         )
     return ("\n".join(lines) + "\n").encode("utf-8")
+
 
 def make_txt_for_turbo_score(rows: List[Dict], candidate_count_used: int) -> bytes:
     lines = [
@@ -1118,6 +1456,7 @@ def make_txt_for_turbo_score(rows: List[Dict], candidate_count_used: int) -> byt
             f"Podobieństwo do ostatnich={row['Podobieństwo do ostatnich']}"
         )
     return ("\n".join(lines) + "\n").encode("utf-8")
+
 
 def make_txt_for_premium(rows: List[Dict], candidate_count_used: int) -> bytes:
     lines = [
@@ -1143,6 +1482,124 @@ def make_txt_for_premium(rows: List[Dict], candidate_count_used: int) -> bytes:
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+def make_txt_for_simulation(sim: Dict) -> bytes:
+    nums = " ".join(f"{x:02d}" for x in sim["sim_set"])
+    lines = [
+        f"AI symulacja Lotto — liczba symulacji: {sim['n_sims']}",
+        f"Sugerowany zestaw: {nums}",
+        "",
+        "TOP pary:"
+    ]
+    if not sim["top_pairs"].empty:
+        for _, row in sim["top_pairs"].iterrows():
+            lines.append(f"{row['Para']} -> {row['Wystąpienia']}")
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def make_txt_for_cycles(cycle_df: pd.DataFrame, cycle_set: List[int]) -> bytes:
+    nums = " ".join(f"{x:02d}" for x in cycle_set)
+    lines = [
+        "Lotto — analiza cykli liczb",
+        f"Sugerowany zestaw cykli: {nums}",
+        "",
+        "TOP liczby cykliczne:"
+    ]
+    for _, row in cycle_df.head(15).iterrows():
+        lines.append(
+            f"Liczba {int(row['Liczba']):02d} | Wystąpienia={int(row['Wystąpienia'])} | "
+            f"Średni cykl={row['Średni_cykl']} | Aktualna przerwa={row['Aktualna_przerwa']} | "
+            f"Cycle ratio={row['Cycle_Ratio']}"
+        )
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def make_txt_for_wielka_szansa(ws: Dict, selected_window: int) -> bytes:
+    nums = " ".join(f"{x:02d}" for x in ws["set"])
+    lines = [
+        "Wielka Szansa — prognoza wykresowa pozycji 1–6",
+        f"Zakres analizy: {selected_window}",
+        f"Faktycznie użyty zakres: {ws['window_used']}",
+        f"Zestaw: {nums}",
+        "",
+        ws["opis"],
+        "",
+        "Szczegóły pozycji:"
+    ]
+    for d in ws["details"]:
+        lines.append(
+            f"Pozycja {d['Pozycja']} | ostatnia={d['Ostatnia wartość']} | "
+            f"prognoza surowa={d['Prognoza']} | prognoza po korekcie={d['Prognoza_po_korekcie']} | "
+            f"pewność={d['Pewność %']} | metoda={d['Metoda']}"
+        )
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+# =========================================================
+# FEATURE DESCRIPTIONS
+# =========================================================
+def render_feature_descriptions():
+    with st.expander("📘 Opisy funkcji aplikacji", expanded=False):
+        st.markdown("""
+**🏆 Generuj kupony**  
+Tworzy kupony zgodnie z wybranym trybem: hybryda, tylko gorące, tylko zimne, mix albo premium.
+
+**🌿 Szczęśliwe cyfry dnia**  
+Buduje zestaw dnia na podstawie ostatnich losowań, balansu parzyste/nieparzyste, niskie/wysokie i rozstrzału.
+
+**📋 Pokaż wyniki**  
+Pokazuje ostatnie wyniki wczytane z `wyniki.pdf` albo `wynik.pdf`.
+
+**🔥 Zestaw 6 HOT**  
+Pokazuje 6 liczb o najwyższym procencie wystąpień w losowaniach z wybranego zakresu.
+
+**📐 Zestaw różnic**  
+Analizuje różnice pozycji 1–6 między najnowszym losowaniem a wcześniejszymi losowaniami i buduje nowy zestaw.
+
+**🔥 HOT MAX 6**  
+Gdy aktywne i ustawione na 6 przy trybie „Tylko gorące”, tworzy pełny zestaw 6 liczb o najwyższym procencie wystąpień.
+
+**⭐ Turbo Score / Ranking kuponów**  
+Generuje wielu kandydatów, punktuje ich i wybiera najlepsze kupony na podstawie:
+- procentu wystąpień liczb,
+- częstotliwości par,
+- częstotliwości trójek,
+- balansu parzyste/nieparzyste,
+- balansu niskie/wysokie,
+- rozstrzału,
+- podobieństwa do ostatnich losowań.
+
+**👑 Premium**  
+Łączy:
+- HOT/COLD,
+- HOT MAX,
+- zestaw różnic pozycyjnych,
+- Turbo Score,
+- mutacje kandydatów.
+
+**🟦 Heatmapa**  
+Pokazuje mapę 1–49 z procentem wystąpień każdej liczby.
+
+**🤖 AI symulacja**  
+Uruchamia ważone symulacje losowań na podstawie historycznych procentów i pokazuje sugerowany zestaw.
+
+**🔄 Cykle liczb**  
+Wyszukuje liczby, które historycznie miały pewien rytm pojawiania się i sprawdza, czy są blisko swojego cyklu.
+
+**🎯 Wielka Szansa**  
+Nowa funkcja. Dla każdej pozycji 1–6 buduje dalszy ciąg „wykresu” tej pozycji:
+- bierze serię z tej samej pozycji,
+- analizuje trend liniowy,
+- analizuje ostatnie przyrosty,
+- analizuje krzywiznę przebiegu,
+- szuka podobnych wzorców historycznych,
+- łączy te prognozy w jedną liczbę końcową,
+- pilnuje, aby końcowy zestaw był rosnący i poprawny jak w Lotto.
+
+**🧠 Tryb inteligentny**  
+Dodatkowe filtry ograniczające mało pożądane układy, np. za dużo kolejnych liczb.
+        """)
+
+
 # =========================================================
 # SETTINGS PANEL
 # =========================================================
@@ -1166,59 +1623,42 @@ def settings_panel(defaults: Dict) -> Dict:
     history_window = st.selectbox(
         "Ile ostatnich losowań brać do analizy HOT/COLD?",
         [50, 100, 250, 500, 750, 1000],
-        index=defaults.get("hist_index", 5),
-        help="Ten zakres wpływa na wyliczanie gorących i zimnych liczb oraz procentów wystąpień."
+        index=defaults.get("hist_index", 5)
     )
 
     difference_window = st.selectbox(
         "Analiza różnic pozycyjnych — zakres losowań",
         [50, 100, 250, 500, 750, 999],
-        index=defaults.get("diff_hist_index", 5),
-        help="Zakres danych używany przez funkcję zestawu różnic pozycyjnych."
+        index=defaults.get("diff_hist_index", 5)
+    )
+
+    wielka_szansa_window = st.selectbox(
+        "Wielka Szansa — zakres wykresu pozycji",
+        [100, 999],
+        index=defaults.get("wielka_idx", 1),
+        help="100 = krótszy, świeższy trend. 999 = pełna historia."
     )
 
     c1, c2 = st.columns(2)
     with c1:
-        n_tickets = st.slider(
-            "Liczba kuponów",
-            1, 500, defaults.get("n_tickets", 50), 1,
-            help="Ile kuponów ma wygenerować aplikacja."
-        )
-        hot_size = st.slider(
-            "Ile liczb w grupie Gorących",
-            6, 35, defaults.get("hot_size", 20), 1,
-            help="Rozmiar grupy gorących liczb wyliczanych z najwyższego procentu wystąpień."
-        )
+        n_tickets = st.slider("Liczba kuponów", 1, 500, defaults.get("n_tickets", 50), 1)
+        hot_size = st.slider("Ile liczb w grupie Gorących", 6, 35, defaults.get("hot_size", 20), 1)
     with c2:
-        preview_limit = st.slider(
-            "Ile kuponów pokazać w podglądzie",
-            10, 200, defaults.get("preview_limit", 60), 10,
-            help="Ile kuponów pokazać na ekranie przed pełną tabelą."
-        )
-        cold_size = st.slider(
-            "Ile liczb w grupie Zimnych",
-            6, 35, defaults.get("cold_size", 20), 1,
-            help="Rozmiar grupy zimnych liczb wyliczanych z najniższego procentu wystąpień."
-        )
+        preview_limit = st.slider("Ile kuponów pokazać w podglądzie", 10, 200, defaults.get("preview_limit", 60), 10)
+        cold_size = st.slider("Ile liczb w grupie Zimnych", 6, 35, defaults.get("cold_size", 20), 1)
 
-    mix_hot_count = st.slider(
-        "MIX: ile liczb z gorących?",
-        1, 5, defaults.get("mix_hot_count", 3), 1,
-        help="W trybie MIX określa ile liczb ma pochodzić z grupy gorącej."
-    )
+    mix_hot_count = st.slider("MIX: ile liczb z gorących?", 1, 5, defaults.get("mix_hot_count", 3), 1)
 
     st.markdown("---")
     st.subheader("🔥 Opcja HOT MAX")
     hot_max_enabled = st.checkbox(
         "Włącz HOT MAX 6 (działa tylko przy trybie: Tylko gorące)",
-        value=defaults.get("hot_max_enabled", False),
-        help="Tworzy zestaw z liczb o najwyższym procencie wystąpień w losowaniach."
+        value=defaults.get("hot_max_enabled", False)
     )
     hot_max_count = st.selectbox(
         "Ile cyfr z HOT MAX?",
         [1, 2, 3, 4, 5, 6],
-        index=defaults.get("hot_max_count_idx", 5),
-        help="Przy wartości 6 generator tworzy pełny zestaw HOT MAX 6."
+        index=defaults.get("hot_max_count_idx", 5)
     )
 
     st.markdown("---")
@@ -1226,14 +1666,12 @@ def settings_panel(defaults: Dict) -> Dict:
     turbo_candidate_count = st.selectbox(
         "Ile kandydatów ma ocenić Turbo Score?",
         [100, 200, 300, 500, 750, 1000],
-        index=defaults.get("turbo_candidate_idx", 3),
-        help="Ile kuponów kandydatów ma zostać wygenerowanych i ocenionych punktowo."
+        index=defaults.get("turbo_candidate_idx", 3)
     )
     turbo_top_n = st.selectbox(
         "Ile najlepszych kuponów pokazać?",
         [3, 5, 10, 15, 20],
-        index=defaults.get("turbo_top_idx", 2),
-        help="Ile najwyżej ocenionych kuponów ma zostać pokazanych po rankingu."
+        index=defaults.get("turbo_top_idx", 4)
     )
 
     st.markdown("---")
@@ -1241,23 +1679,25 @@ def settings_panel(defaults: Dict) -> Dict:
     premium_candidate_count = st.selectbox(
         "Premium: ile kandydatów ma zbudować silnik premium?",
         [200, 300, 500, 750, 1000, 1500],
-        index=defaults.get("premium_candidate_idx", 2),
-        help="Premium generuje i miesza kandydatów z wielu źródeł, a potem wybiera najlepsze."
+        index=defaults.get("premium_candidate_idx", 2)
     )
     premium_top_n = st.selectbox(
         "Premium: ile finalnych kuponów pokazać?",
         [3, 5, 10, 15, 20],
-        index=defaults.get("premium_top_idx", 2),
-        help="Ile najwyżej ocenionych kuponów premium ma zostać pokazanych."
+        index=defaults.get("premium_top_idx", 4)
+    )
+
+    st.markdown("---")
+    st.subheader("🤖 AI symulacja")
+    ai_sim_count = st.selectbox(
+        "Ile losowań ma zasymulować AI?",
+        [5000, 10000, 25000, 50000, 100000],
+        index=defaults.get("ai_sim_idx", 4)
     )
 
     st.markdown("---")
     st.subheader("🧠 Tryb inteligentny (opcjonalny)")
-    smart_enabled = st.checkbox(
-        "Włącz tryb inteligentny",
-        value=defaults.get("smart_enabled", False),
-        help="Dodatkowe filtry: kolejne liczby, limit par i balans parzyste/nieparzyste."
-    )
+    smart_enabled = st.checkbox("Włącz tryb inteligentny", value=defaults.get("smart_enabled", False))
 
     if smart_enabled:
         block_run_2 = st.checkbox("Blokuj układy 1–2 (kolejne liczby)", value=defaults.get("block_run_2", True))
@@ -1288,6 +1728,7 @@ def settings_panel(defaults: Dict) -> Dict:
         "mode_ui": mode_ui,
         "history_window": int(history_window),
         "difference_window": int(difference_window),
+        "wielka_szansa_window": int(wielka_szansa_window),
         "n_tickets": int(n_tickets),
         "hot_size": int(hot_size),
         "cold_size": int(cold_size),
@@ -1299,6 +1740,7 @@ def settings_panel(defaults: Dict) -> Dict:
         "turbo_top_n": int(turbo_top_n),
         "premium_candidate_count": int(premium_candidate_count),
         "premium_top_n": int(premium_top_n),
+        "ai_sim_count": int(ai_sim_count),
         "smart_enabled": bool(smart_enabled),
         "block_run_2": bool(block_run_2),
         "block_run_3": bool(block_run_3),
@@ -1306,54 +1748,6 @@ def settings_panel(defaults: Dict) -> Dict:
         "even_odd_choice": even_odd_choice,
         "max_attempts_per_ticket": int(max_attempts_per_ticket),
     }
-
-
-# =========================================================
-# FEATURE DESCRIPTIONS
-# =========================================================
-def render_feature_descriptions():
-    with st.expander("📘 Opisy funkcji aplikacji", expanded=False):
-        st.markdown("""
-**🏆 Generuj kupony**  
-Tworzy kupony zgodnie z wybranym trybem: hybryda, tylko gorące, tylko zimne, mix albo premium.
-
-**🌿 Szczęśliwe cyfry dnia**  
-Buduje zestaw dnia na podstawie ostatnich losowań, balansu parzyste/nieparzyste, niskie/wysokie i rozstrzału.
-
-**📋 Pokaż wyniki**  
-Pokazuje ostatnie wyniki wczytane z `wyniki.pdf`.
-
-**🔥 Zestaw 6 HOT**  
-Pokazuje 6 liczb o najwyższym procencie wystąpień w losowaniach z wybranego zakresu.
-
-**📐 Zestaw różnic**  
-Analizuje różnice pozycji 1–6 między najnowszym losowaniem a wcześniejszymi losowaniami i buduje nowy zestaw.
-
-**🔥 HOT MAX 6**  
-Gdy aktywne i ustawione na 6 przy trybie „Tylko gorące”, tworzy pełny zestaw 6 liczb o najwyższym procencie wystąpień.
-
-**⭐ Turbo Score / Ranking kuponów**  
-Generuje wielu kandydatów, punktuje ich i wybiera najlepsze kupony na podstawie:
-- procentu wystąpień liczb,
-- częstotliwości par,
-- częstotliwości trójek,
-- balansu parzyste/nieparzyste,
-- balansu niskie/wysokie,
-- rozstrzału,
-- podobieństwa do ostatnich losowań.
-
-**👑 Premium**  
-To najmocniejszy tryb aplikacji. Łączy jednocześnie:
-- HOT/COLD,
-- HOT MAX,
-- zestaw różnic pozycyjnych,
-- Turbo Score,
-- dodatkowe mutacje kandydatów.  
-Na końcu wybiera topowe kupony premium z najwyższą punktacją.
-
-**🧠 Tryb inteligentny**  
-Dodatkowe filtry ograniczające mało pożądane układy, np. za dużo kolejnych liczb.
-        """)
 
 
 # =========================================================
@@ -1369,32 +1763,33 @@ def main():
     st.markdown(LIGHT_GREEN_CSS, unsafe_allow_html=True)
 
     st.title(APP_TITLE)
-    st.write("Generator typowań Lotto na bazie historii losowań z pliku **wyniki.pdf** (1–49, typuje 6 liczb).")
-    st.caption("Dodano tryb Premium 👑, który łączy wszystkie najmocniejsze funkcje generatora.")
+    st.write("Generator typowań Lotto na bazie historii losowań z pliku **wyniki.pdf** / **wynik.pdf** (1–49, typuje 6 liczb).")
+    st.caption("Dodano nową funkcję: Wielka Szansa — prognoza dalszego przebiegu wykresu pozycji 1–6.")
 
-    if "last_records" not in st.session_state:
-        st.session_state["last_records"] = []
-    if "last_daily" not in st.session_state:
-        st.session_state["last_daily"] = None
-    if "show_results" not in st.session_state:
-        st.session_state["show_results"] = False
-    if "hot_master_set" not in st.session_state:
-        st.session_state["hot_master_set"] = None
-    if "difference_set" not in st.session_state:
-        st.session_state["difference_set"] = None
-    if "hot_max_set" not in st.session_state:
-        st.session_state["hot_max_set"] = None
-    if "turbo_score_result" not in st.session_state:
-        st.session_state["turbo_score_result"] = None
-    if "premium_result" not in st.session_state:
-        st.session_state["premium_result"] = None
+    session_defaults = {
+        "last_records": [],
+        "last_daily": None,
+        "show_results": False,
+        "hot_master_set": None,
+        "difference_set": None,
+        "hot_max_set": None,
+        "turbo_score_result": None,
+        "premium_result": None,
+        "ai_sim_result": None,
+        "cycle_result": None,
+        "heatmap_df": None,
+        "wielka_szansa_result": None,
+    }
+    for key, value in session_defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
-    pdf_path = Path(os.getcwd()) / PDF_FILENAME
+    pdf_path = resolve_pdf_path()
 
     st.markdown('<div class="v-card">', unsafe_allow_html=True)
     st.subheader("📄 Dane wejściowe")
     st.write(f"Plik: `{pdf_path}`")
-    st.write(f"Silnik PDF: **{'PyMuPDF (fitz)' if HAS_PYMUPDF else 'pypdf (fallback)'}**")
+    st.write("Silnik PDF: **PyMuPDF (fitz)**")
     st.markdown(
         '<div class="v-muted">Gorące = najwyższy procent losowań z wystąpieniem liczby. '
         'Zimne = najniższy procent losowań z wystąpieniem liczby.</div>',
@@ -1405,7 +1800,7 @@ def main():
     render_feature_descriptions()
 
     if not pdf_path.exists():
-        st.error(f"❌ Nie znaleziono `{PDF_FILENAME}` obok `app.py`.")
+        st.error("❌ Nie znaleziono pliku `wyniki.pdf` ani `wynik.pdf` obok `app.py`.")
         st.stop()
 
     try:
@@ -1420,6 +1815,7 @@ def main():
         "mode_index": 0,
         "hist_index": 5,
         "diff_hist_index": 5,
+        "wielka_idx": 1,
         "n_tickets": 50,
         "hot_size": 20,
         "cold_size": 20,
@@ -1428,9 +1824,10 @@ def main():
         "hot_max_enabled": False,
         "hot_max_count_idx": 5,
         "turbo_candidate_idx": 3,
-        "turbo_top_idx": 2,
+        "turbo_top_idx": 4,
         "premium_candidate_idx": 2,
-        "premium_top_idx": 2,
+        "premium_top_idx": 4,
+        "ai_sim_idx": 4,
         "smart_enabled": False,
         "block_run_2": True,
         "block_run_3": True,
@@ -1475,36 +1872,41 @@ def main():
         st.subheader("🎛️ Wybrany tryb")
         st.write(f"**Tryb:** {cfg['mode_ui']}")
         st.write(f"**Analiza HOT/COLD:** ostatnie **{history_window_used}** losowań")
-        st.write(f"**Analiza różnic pozycyjnych:** ostatnie **{cfg['difference_window']}** losowań")
-        st.write(f"**HOT MAX 6:** {'TAK' if cfg['hot_max_enabled'] else 'NIE'}")
-        st.write(f"**Liczb z HOT MAX:** {cfg['hot_max_count']}")
+        st.write(f"**Wielka Szansa:** zakres **{cfg['wielka_szansa_window']}**")
         st.write(f"**Turbo Score — kandydaci:** {cfg['turbo_candidate_count']}")
         st.write(f"**Turbo Score — TOP:** {cfg['turbo_top_n']}")
         st.write(f"**Premium — kandydaci:** {cfg['premium_candidate_count']}")
         st.write(f"**Premium — TOP:** {cfg['premium_top_n']}")
+        st.write(f"**AI symulacja:** {cfg['ai_sim_count']} losowań")
         st.write(f"**Tryb inteligentny:** {'TAK' if cfg['smart_enabled'] else 'NIE'}")
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
 
     st.markdown('<div class="v-card">', unsafe_allow_html=True)
-    st.subheader("🎟️ Generator")
+    st.subheader("🎟️ Narzędzia")
 
-    col_btn1, col_btn2, col_btn3, col_btn4, col_btn5, col_btn6, col_btn7 = st.columns(7, gap="large")
-    with col_btn1:
+    c1, c2, c3, c4 = st.columns(4, gap="large")
+    with c1:
         generate = st.button("🏆 GENERUJ KUPONY", type="primary", use_container_width=True)
-    with col_btn2:
         daily = st.button("🌿 SZCZĘŚLIWE CYFRY DNIA", type="primary", use_container_width=True)
-    with col_btn3:
+    with c2:
         show_res = st.button("📋 POKAŻ WYNIKI", type="primary", use_container_width=True)
-    with col_btn4:
         show_hot_set = st.button("🔥 ZESTAW 6 HOT", type="primary", use_container_width=True)
-    with col_btn5:
+    with c3:
         build_diff_set = st.button("📐 ZESTAW RÓŻNIC", type="primary", use_container_width=True)
-    with col_btn6:
         build_turbo = st.button("⭐ TURBO SCORE", type="primary", use_container_width=True)
-    with col_btn7:
+    with c4:
         build_premium = st.button("👑 PREMIUM", type="primary", use_container_width=True)
+        build_ai_sim = st.button("🤖 AI SYMULACJA", type="primary", use_container_width=True)
+
+    c5, c6, c7 = st.columns(3, gap="large")
+    with c5:
+        build_heatmap = st.button("🟦 HEATMAPA", type="primary", use_container_width=True)
+    with c6:
+        build_cycles = st.button("🔄 CYKLE LICZB", type="primary", use_container_width=True)
+    with c7:
+        build_wielka_szansa = st.button("🎯 WIELKA SZANSA", type="primary", use_container_width=True)
 
     if show_res:
         st.session_state["show_results"] = not st.session_state["show_results"]
@@ -1515,6 +1917,10 @@ def main():
     if build_diff_set:
         diff_data = build_positional_difference_set([r["nums"] for r in result_records_all], cfg["difference_window"])
         st.session_state["difference_set"] = diff_data
+
+    if build_wielka_szansa:
+        ws_data = build_wielka_szansa_set([r["nums"] for r in result_records_all], cfg["wielka_szansa_window"])
+        st.session_state["wielka_szansa_result"] = ws_data
 
     mode_ui = cfg["mode_ui"]
     if mode_ui == "Hybryda 70/20/10 (hot/cold/mix)":
@@ -1529,9 +1935,9 @@ def main():
         base_mode_kind = "mix"
 
     hot_max_mode_active = (
-        base_mode_kind == "hot" and
-        cfg["hot_max_enabled"] and
-        cfg["hot_max_count"] == 6
+        base_mode_kind == "hot"
+        and cfg["hot_max_enabled"]
+        and cfg["hot_max_count"] == 6
     )
 
     if build_turbo:
@@ -1557,6 +1963,22 @@ def main():
         )
         st.session_state["premium_result"] = premium_result
 
+    if build_ai_sim:
+        st.session_state["ai_sim_result"] = run_ai_simulation_cached(
+            percent_df=percent_df,
+            n_sims=cfg["ai_sim_count"]
+        )
+
+    if build_cycles:
+        cycle_df = detect_cycles_cached(draws)
+        st.session_state["cycle_result"] = {
+            "df": cycle_df,
+            "set": sorted(cycle_df.head(PICK_COUNT)["Liczba"].tolist())
+        }
+
+    if build_heatmap:
+        st.session_state["heatmap_df"] = build_heatmap_df(percent_df, columns_per_row=7)
+
     def gen_one_record() -> Dict:
         if base_mode_kind == "premium":
             premium_result_local = build_premium_ranking(
@@ -1565,7 +1987,7 @@ def main():
                 cold=cold,
                 mix_hot_count=cfg["mix_hot_count"],
                 candidate_count=cfg["premium_candidate_count"],
-                top_n=max(3, min(cfg["premium_top_n"], 10))
+                top_n=max(3, min(cfg["premium_top_n"], 20))
             )
             best_row = premium_result_local["rows"][0]
             return {
@@ -1616,6 +2038,7 @@ def main():
                     })
                     progress.progress(int((i + 1) / total * 100))
                     status.write(f"Postęp: {i+1}/{total}")
+
             elif hot_max_mode_active:
                 hot_max_set, hot_max_table = gen_ticket_hot_max_percent(draws)
                 recs = []
@@ -1694,6 +2117,9 @@ def main():
             "target_spread": target_spread
         }
 
+    # =========================================================
+    # OUTPUT SECTIONS
+    # =========================================================
     if st.session_state["show_results"]:
         st.markdown("### 📋 Ostatnie wyniki (z PDF)")
         count_choice = st.selectbox("Ile ostatnich wyników pokazać?", [10, 50, 100], index=0)
@@ -1706,13 +2132,11 @@ def main():
         })
         st.dataframe(df_results, use_container_width=True, hide_index=True)
 
-        st.markdown('<div class="v-muted">Zapis jest dostępny wyłącznie jako plik TXT (pobieranie → folder „Pobrane”).</div>', unsafe_allow_html=True)
-        filename_input = st.text_input("Nazwa pliku .txt (np. wyniki.txt)", value="wyniki.txt")
-        safe_name = sanitize_txt_filename(filename_input)
+        results_name = sanitize_txt_filename(st.text_input("Nazwa pliku wyników .txt", value="wyniki.txt"))
         st.download_button(
             "⬇️ Pobierz wyniki jako TXT",
             data=make_txt_for_results(slice_records),
-            file_name=safe_name,
+            file_name=results_name,
             mime="text/plain",
             use_container_width=True
         )
@@ -1728,12 +2152,58 @@ def main():
             unsafe_allow_html=True
         )
 
-        hot_set_filename_input = st.text_input("Nazwa pliku zestawu HOT .txt", value="hot6.txt")
-        safe_hot_name = sanitize_txt_filename(hot_set_filename_input)
+        hot_set_name = sanitize_txt_filename(st.text_input("Nazwa pliku zestawu HOT .txt", value="hot6.txt"))
         st.download_button(
             "⬇️ Pobierz zestaw HOT 6 jako TXT",
             data=make_txt_for_hot_master_set(hot_set, history_window_used),
-            file_name=safe_hot_name,
+            file_name=hot_set_name,
+            mime="text/plain",
+            use_container_width=True
+        )
+
+    if st.session_state.get("difference_set") is not None:
+        diff_data = st.session_state["difference_set"]
+        diff_set_str = " ".join(f"{x:02d}" for x in diff_data["set"])
+
+        st.markdown("### 📐 Zestaw różnic pozycyjnych")
+        st.markdown(
+            f'<div class="v-row"><b>Zestaw różnic</b> — {diff_set_str} '
+            f'<span class="v-muted"> | zakres użytkownika: {cfg["difference_window"]} | faktycznie użyto: {diff_data["window_used"]}</span></div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown("#### Szczegóły pozycji")
+        df_diff = pd.DataFrame(diff_data["details"])
+        st.dataframe(df_diff, use_container_width=True, hide_index=True)
+
+        diff_name = sanitize_txt_filename(st.text_input("Nazwa pliku zestawu różnic .txt", value="roznice_pozycyjne.txt"))
+        st.download_button(
+            "⬇️ Pobierz zestaw różnic jako TXT",
+            data=make_txt_for_difference_set(diff_data, cfg["difference_window"]),
+            file_name=diff_name,
+            mime="text/plain",
+            use_container_width=True
+        )
+
+    if st.session_state.get("wielka_szansa_result") is not None:
+        ws = st.session_state["wielka_szansa_result"]
+        ws_str = " ".join(f"{x:02d}" for x in ws["set"])
+
+        st.markdown("### 🎯 Wielka Szansa")
+        st.markdown(
+            f'<div class="v-row-danger"><b>Prognoza wykresowa</b> — {ws_str} '
+            f'<span class="v-muted"> | zakres: {cfg["wielka_szansa_window"]} | użyto: {ws["window_used"]}</span></div>',
+            unsafe_allow_html=True
+        )
+        st.markdown(f'<div class="v-muted">{ws["opis"]}</div>', unsafe_allow_html=True)
+        st.markdown("#### Szczegóły pozycji")
+        st.dataframe(pd.DataFrame(ws["details"]), use_container_width=True, hide_index=True)
+
+        ws_name = sanitize_txt_filename(st.text_input("Nazwa pliku Wielka Szansa .txt", value="wielka_szansa.txt"))
+        st.download_button(
+            "⬇️ Pobierz Wielką Szansę jako TXT",
+            data=make_txt_for_wielka_szansa(ws, cfg["wielka_szansa_window"]),
+            file_name=ws_name,
             mime="text/plain",
             use_container_width=True
         )
@@ -1756,37 +2226,11 @@ def main():
         hot_max_table_display["Procent_losowan"] = hot_max_table_display["Procent_losowan"].map(lambda x: f"{x:.2f}%")
         st.dataframe(hot_max_table_display, use_container_width=True, hide_index=True)
 
-        hot_max_filename_input = st.text_input("Nazwa pliku HOT MAX .txt", value="hot_max_6.txt")
-        safe_hot_max_name = sanitize_txt_filename(hot_max_filename_input)
+        hot_max_name = sanitize_txt_filename(st.text_input("Nazwa pliku HOT MAX .txt", value="hot_max_6.txt"))
         st.download_button(
             "⬇️ Pobierz HOT MAX 6 jako TXT",
             data=make_txt_for_hot_max_set(hot_max_set, hot_max_table, hms["window"]),
-            file_name=safe_hot_max_name,
-            mime="text/plain",
-            use_container_width=True
-        )
-
-    if st.session_state.get("difference_set") is not None:
-        diff_data = st.session_state["difference_set"]
-        diff_set_str = " ".join(f"{x:02d}" for x in diff_data["set"])
-
-        st.markdown("### 📐 Zestaw różnic pozycyjnych")
-        st.markdown(
-            f'<div class="v-row"><b>Zestaw różnic</b> — {diff_set_str} '
-            f'<span class="v-muted"> | zakres użytkownika: {cfg["difference_window"]} | faktycznie użyto: {diff_data["window_used"]}</span></div>',
-            unsafe_allow_html=True
-        )
-
-        st.markdown("#### Szczegóły pozycji")
-        df_diff = pd.DataFrame(diff_data["details"])
-        st.dataframe(df_diff, use_container_width=True, hide_index=True)
-
-        diff_filename_input = st.text_input("Nazwa pliku zestawu różnic .txt", value="roznice_pozycyjne.txt")
-        safe_diff_name = sanitize_txt_filename(diff_filename_input)
-        st.download_button(
-            "⬇️ Pobierz zestaw różnic jako TXT",
-            data=make_txt_for_difference_set(diff_data, cfg["difference_window"]),
-            file_name=safe_diff_name,
+            file_name=hot_max_name,
             mime="text/plain",
             use_container_width=True
         )
@@ -1819,12 +2263,11 @@ def main():
             unsafe_allow_html=True
         )
 
-        turbo_filename_input = st.text_input("Nazwa pliku Turbo Score .txt", value="turbo_score.txt")
-        safe_turbo_name = sanitize_txt_filename(turbo_filename_input)
+        turbo_name = sanitize_txt_filename(st.text_input("Nazwa pliku Turbo Score .txt", value="turbo_score.txt"))
         st.download_button(
             "⬇️ Pobierz ranking Turbo Score jako TXT",
             data=make_txt_for_turbo_score(turbo["rows"], turbo["candidate_count_used"]),
-            file_name=safe_turbo_name,
+            file_name=turbo_name,
             mime="text/plain",
             use_container_width=True
         )
@@ -1870,15 +2313,66 @@ Niskie/Wysokie: {profile["target_low_high"][0]}/{profile["target_low_high"][1]}<
             unsafe_allow_html=True
         )
 
-        premium_filename_input = st.text_input("Nazwa pliku Premium .txt", value="premium_mode.txt")
-        safe_premium_name = sanitize_txt_filename(premium_filename_input)
+        premium_name = sanitize_txt_filename(st.text_input("Nazwa pliku Premium .txt", value="premium_mode.txt"))
         st.download_button(
             "⬇️ Pobierz ranking Premium jako TXT",
             data=make_txt_for_premium(premium["rows"], premium["candidate_count_used"]),
-            file_name=safe_premium_name,
+            file_name=premium_name,
             mime="text/plain",
             use_container_width=True
         )
+
+    if st.session_state.get("ai_sim_result") is not None:
+        sim = st.session_state["ai_sim_result"]
+        sim_str = " ".join(f"{x:02d}" for x in sim["sim_set"])
+
+        st.markdown("### 🤖 AI symulacja")
+        st.markdown(
+            f'<div class="v-row-blue"><b>Symulacje:</b> {sim["n_sims"]} | <b>Sugerowany zestaw:</b> {sim_str}</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown("#### Wyniki symulacji")
+        st.dataframe(sim["sim_df"].head(20), use_container_width=True, hide_index=True)
+
+        if not sim["top_pairs"].empty:
+            st.markdown("#### Najczęstsze pary w symulacji")
+            st.dataframe(sim["top_pairs"], use_container_width=True, hide_index=True)
+
+        sim_name = sanitize_txt_filename(st.text_input("Nazwa pliku AI symulacji .txt", value="ai_symulacja.txt"))
+        st.download_button(
+            "⬇️ Pobierz wynik AI symulacji jako TXT",
+            data=make_txt_for_simulation(sim),
+            file_name=sim_name,
+            mime="text/plain",
+            use_container_width=True
+        )
+
+    if st.session_state.get("cycle_result") is not None:
+        cyc = st.session_state["cycle_result"]
+        cycle_set_str = " ".join(f"{x:02d}" for x in cyc["set"])
+
+        st.markdown("### 🔄 Cykle liczb")
+        st.markdown(
+            f'<div class="v-row-blue"><b>Sugerowany zestaw cykli:</b> {cycle_set_str}</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown("#### TOP liczby cykliczne")
+        st.dataframe(cyc["df"].head(20), use_container_width=True, hide_index=True)
+
+        cycle_name = sanitize_txt_filename(st.text_input("Nazwa pliku cykli .txt", value="cykle_liczb.txt"))
+        st.download_button(
+            "⬇️ Pobierz analizę cykli jako TXT",
+            data=make_txt_for_cycles(cyc["df"], cyc["set"]),
+            file_name=cycle_name,
+            mime="text/plain",
+            use_container_width=True
+        )
+
+    if st.session_state.get("heatmap_df") is not None:
+        st.markdown("### 🟦 Heatmapa 1–49")
+        st.dataframe(st.session_state["heatmap_df"], use_container_width=True, hide_index=True)
 
     if st.session_state.get("last_daily") is not None:
         info = st.session_state["last_daily"]
@@ -1940,13 +2434,11 @@ Niskie/Wysokie: {profile["target_low_high"][0]}/{profile["target_low_high"][1]}<
         st.markdown("#### Pełna tabela")
         st.dataframe(df_out, use_container_width=True, hide_index=True)
 
-        st.markdown('<div class="v-muted">Zapis kuponów jest dostępny wyłącznie jako plik TXT (pobieranie → „Pobrane”).</div>', unsafe_allow_html=True)
-        ticket_filename_input = st.text_input("Nazwa pliku kuponów .txt", value="kupony.txt")
-        safe_ticket_name = sanitize_txt_filename(ticket_filename_input)
+        tickets_name = sanitize_txt_filename(st.text_input("Nazwa pliku kuponów .txt", value="kupony.txt"))
         st.download_button(
             "⬇️ Pobierz kupony jako TXT",
             data=make_txt_for_tickets(records),
-            file_name=safe_ticket_name,
+            file_name=tickets_name,
             mime="text/plain",
             use_container_width=True
         )
