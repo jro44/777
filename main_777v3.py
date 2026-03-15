@@ -1,4 +1,3 @@
-import io
 import os
 import re
 import random
@@ -16,7 +15,7 @@ import streamlit as st
 # APP CONFIG
 # =========================================================
 APP_TITLE = "🏆 Generator-Victory — Lotto 6/49"
-PDF_CANDIDATES = ["wyniki.pdf"]
+PDF_CANDIDATES = ["wyniki.pdf", "wynik.pdf"]
 NUM_MIN = 1
 NUM_MAX = 49
 PICK_COUNT = 6
@@ -168,6 +167,45 @@ LIGHT_GREEN_CSS = """
   color: #000000 !important;
 }
 
+.rank-card{
+  background: linear-gradient(180deg, #ffffff, #f8fffb);
+  border: 1px solid rgba(0,168,107,0.18);
+  border-radius: 16px;
+  padding: 14px 14px 12px 14px;
+  margin: 10px 0;
+  box-shadow: 0 8px 18px rgba(0,0,0,.05);
+}
+
+.rank-card-premium{
+  background: linear-gradient(180deg, #fffdf6, #fff9ea);
+  border: 1px solid rgba(212,175,55,0.28);
+  border-radius: 16px;
+  padding: 14px 14px 12px 14px;
+  margin: 10px 0;
+  box-shadow: 0 8px 18px rgba(0,0,0,.05);
+}
+
+.rank-title{
+  font-size: 1.05rem;
+  font-weight: 900;
+  margin-bottom: 6px;
+  color:#000000 !important;
+}
+
+.rank-main{
+  font-size: 1.2rem;
+  font-weight: 1000;
+  letter-spacing: .8px;
+  margin-bottom: 6px;
+  color:#000000 !important;
+}
+
+.rank-meta{
+  font-size: .95rem;
+  line-height: 1.55;
+  color:#000000 !important;
+}
+
 [data-testid="stDataFrame"]{
   border-radius: 16px !important;
   overflow: hidden !important;
@@ -203,6 +241,7 @@ button[kind="header"]{
 
 @media (max-width: 640px){
   div.stButton > button[kind="primary"]{ width: 100% !important; }
+  .rank-main{ font-size: 1.05rem; }
 }
 </style>
 """
@@ -265,6 +304,95 @@ def pick_unique(pool: List[int], k: int) -> List[int]:
 
 def clamp(value: int, low: int, high: int) -> int:
     return max(low, min(high, value))
+
+
+# =========================================================
+# VISUAL HELPERS
+# =========================================================
+def render_ticket_cards(records: List[Dict], preview_n: int) -> None:
+    for i in range(preview_n):
+        typ = records[i]["Typ"]
+        kupon = records[i]["Kupon"]
+        nums_str = " ".join(f"{x:02d}" for x in kupon)
+        ev, od = even_odd_split(kupon)
+        pairs = count_adjacent_pairs(sorted(kupon))
+        css_class = "rank-card-premium" if typ == "premium" else "rank-card"
+
+        st.markdown(
+            f"""
+<div class="{css_class}">
+  <div class="rank-title">Kupon #{i+1:03d} <span class="v-muted">[{typ}]</span></div>
+  <div class="rank-main">{nums_str}</div>
+  <div class="rank-meta">
+    Parzyste/Nieparzyste: <b>{ev}/{od}</b><br>
+    Pary kolejne: <b>{pairs}</b>
+  </div>
+</div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+def render_turbo_cards(rows: List[Dict]) -> None:
+    for row in rows:
+        st.markdown(
+            f"""
+<div class="rank-card">
+  <div class="rank-title">Ranking #{row["Ranking"]}</div>
+  <div class="rank-main">{row["Kupon"]}</div>
+  <div class="rank-meta">
+    Score: <b>{row["Score"]}</b><br>
+    Score liczb: <b>{row["Score liczb"]}</b> | Score par: <b>{row["Score par"]}</b> | Score trójek: <b>{row["Score trójek"]}</b><br>
+    Parzyste/Nieparzyste: <b>{row["Parzyste/Nieparzyste"]}</b><br>
+    Niskie/Wysokie: <b>{row["Niskie/Wysokie"]}</b><br>
+    Rozstrzał: <b>{row["Rozstrzał"]}</b> | Pary kolejne: <b>{row["Pary kolejne"]}</b><br>
+    Podobieństwo do ostatnich: <b>{row["Podobieństwo do ostatnich"]}</b>
+  </div>
+</div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+def render_premium_cards(rows: List[Dict]) -> None:
+    for row in rows:
+        st.markdown(
+            f"""
+<div class="rank-card-premium">
+  <div class="rank-title">Premium #{row["Ranking"]}</div>
+  <div class="rank-main">{row["Kupon"]}</div>
+  <div class="rank-meta">
+    Premium Score: <b>{row["Premium Score"]}</b><br>
+    Bazowy Score: <b>{row["Bazowy Score"]}</b> | Bonus Premium: <b>{row["Bonus Premium"]}</b><br>
+    HOT MAX trafień: <b>{row["HOT MAX trafień"]}</b> | Różnice trafień: <b>{row["Różnice trafień"]}</b> | Hot trafień: <b>{row["Hot trafień"]}</b><br>
+    Parzyste/Nieparzyste: <b>{row["Parzyste/Nieparzyste"]}</b><br>
+    Niskie/Wysokie: <b>{row["Niskie/Wysokie"]}</b><br>
+    Rozstrzał: <b>{row["Rozstrzał"]}</b> | Pary kolejne: <b>{row["Pary kolejne"]}</b><br>
+    Podobieństwo do ostatnich: <b>{row["Podobieństwo do ostatnich"]}</b>
+  </div>
+</div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+def render_wielka_szansa_cards(details: List[Dict]) -> None:
+    for d in details:
+        st.markdown(
+            f"""
+<div class="rank-card">
+  <div class="rank-title">Pozycja #{d["Pozycja"]}</div>
+  <div class="rank-main">Prognoza po korekcie: {int(d["Prognoza_po_korekcie"]):02d}</div>
+  <div class="rank-meta">
+    Ostatnia wartość: <b>{d["Ostatnia wartość"]}</b><br>
+    Prognoza surowa: <b>{d["Prognoza"]}</b><br>
+    Pewność: <b>{d["Pewność %"]}%</b><br>
+    Metoda: <b>{d["Metoda"]}</b>
+  </div>
+</div>
+            """,
+            unsafe_allow_html=True
+        )
 
 
 # =========================================================
@@ -1171,7 +1299,7 @@ def detect_cycles_cached(draws: List[List[int]]) -> pd.DataFrame:
 
 
 # =========================================================
-# WIELKA SZANSA — NOWA FUNKCJA
+# WIELKA SZANSA
 # =========================================================
 def _series_for_position(draws_newest_first: List[List[int]], pos_idx: int, window: int) -> List[int]:
     subset = draws_newest_first[:min(window, len(draws_newest_first))]
@@ -1586,7 +1714,7 @@ Uruchamia ważone symulacje losowań na podstawie historycznych procentów i pok
 Wyszukuje liczby, które historycznie miały pewien rytm pojawiania się i sprawdza, czy są blisko swojego cyklu.
 
 **🎯 Wielka Szansa**  
-Nowa funkcja. Dla każdej pozycji 1–6 buduje dalszy ciąg „wykresu” tej pozycji:
+Dla każdej pozycji 1–6 buduje dalszy ciąg „wykresu” tej pozycji:
 - bierze serię z tej samej pozycji,
 - analizuje trend liniowy,
 - analizuje ostatnie przyrosty,
@@ -1764,7 +1892,7 @@ def main():
 
     st.title(APP_TITLE)
     st.write("Generator typowań Lotto na bazie historii losowań z pliku **wyniki.pdf** / **wynik.pdf** (1–49, typuje 6 liczb).")
-    st.caption("Dodano nową funkcję: Wielka Szansa — prognoza dalszego przebiegu wykresu pozycji 1–6.")
+    st.caption("Poprawiona wersja: rankingi Turbo Score, Premium i Wielka Szansa są wyświetlane jako czytelne karty, bez psucia układu na telefonach.")
 
     session_defaults = {
         "last_records": [],
@@ -2197,7 +2325,10 @@ def main():
         )
         st.markdown(f'<div class="v-muted">{ws["opis"]}</div>', unsafe_allow_html=True)
         st.markdown("#### Szczegóły pozycji")
-        st.dataframe(pd.DataFrame(ws["details"]), use_container_width=True, hide_index=True)
+        render_wielka_szansa_cards(ws["details"])
+
+        with st.expander("Pokaż tabelę szczegółową Wielkiej Szansy"):
+            st.dataframe(pd.DataFrame(ws["details"]), use_container_width=True, hide_index=True)
 
         ws_name = sanitize_txt_filename(st.text_input("Nazwa pliku Wielka Szansa .txt", value="wielka_szansa.txt"))
         st.download_button(
@@ -2237,7 +2368,6 @@ def main():
 
     if st.session_state.get("turbo_score_result") is not None:
         turbo = st.session_state["turbo_score_result"]
-        turbo_df = pd.DataFrame(turbo["rows"])
 
         st.markdown("### ⭐ Turbo Score — ranking kuponów")
         st.markdown(
@@ -2247,7 +2377,10 @@ def main():
         )
 
         st.markdown("#### Najlepsze kupony według punktacji")
-        st.dataframe(turbo_df, use_container_width=True, hide_index=True)
+        render_turbo_cards(turbo["rows"])
+
+        with st.expander("Pokaż tabelę Turbo Score"):
+            st.dataframe(pd.DataFrame(turbo["rows"]), use_container_width=True, hide_index=True)
 
         profile = turbo["target_profile"]
         st.markdown("#### Profil docelowy wyliczony z bazy")
@@ -2274,7 +2407,6 @@ def main():
 
     if st.session_state.get("premium_result") is not None:
         premium = st.session_state["premium_result"]
-        premium_df = pd.DataFrame(premium["rows"])
 
         st.markdown("### 👑 Premium — ranking końcowy")
         st.markdown(
@@ -2284,7 +2416,10 @@ def main():
         )
 
         st.markdown("#### Najlepsze kupony premium")
-        st.dataframe(premium_df, use_container_width=True, hide_index=True)
+        render_premium_cards(premium["rows"])
+
+        with st.expander("Pokaż tabelę Premium"):
+            st.dataframe(pd.DataFrame(premium["rows"]), use_container_width=True, hide_index=True)
 
         hot_max_str = " ".join(f"{x:02d}" for x in premium["hot_max_set"])
         diff_str = " ".join(f"{x:02d}" for x in premium["diff_set"])
@@ -2409,30 +2544,16 @@ Niskie/Wysokie: {profile["target_low_high"][0]}/{profile["target_low_high"][1]}<
     records = st.session_state.get("last_records", [])
     if records:
         st.markdown("### 🎯 Wygenerowane kupony")
-        df_out = pd.DataFrame({
-            "Typ": [r["Typ"] for r in records],
-            "Kupon": [" ".join(f"{x:02d}" for x in r["Kupon"]) for r in records],
-        })
-
         preview_n = min(int(cfg["preview_limit"]), len(records))
-        st.caption(f"Podgląd pierwszych **{preview_n}** kuponów (pełna lista w tabeli).")
+        st.caption(f"Podgląd pierwszych **{preview_n}** kuponów.")
+        render_ticket_cards(records, preview_n)
 
-        for i in range(preview_n):
-            nums_str = df_out.iloc[i]["Kupon"]
-            typ = df_out.iloc[i]["Typ"]
-            t = [int(x) for x in nums_str.split()]
-            ev, od = even_odd_split(t)
-            pairs = count_adjacent_pairs(sorted(t))
-            row_class = "v-row-premium" if typ == "premium" else "v-row"
-            st.markdown(
-                f'<div class="{row_class}"><b>Kupon #{i+1:03d}</b> '
-                f'<span class="v-muted">[{typ}]</span> — {nums_str} '
-                f'<span class="v-muted"> | parzyste/nieparzyste: {ev}/{od} | pary: {pairs}</span></div>',
-                unsafe_allow_html=True
-            )
-
-        st.markdown("#### Pełna tabela")
-        st.dataframe(df_out, use_container_width=True, hide_index=True)
+        with st.expander("Pokaż pełną tabelę kuponów"):
+            df_out = pd.DataFrame({
+                "Typ": [r["Typ"] for r in records],
+                "Kupon": [" ".join(f"{x:02d}" for x in r["Kupon"]) for r in records],
+            })
+            st.dataframe(df_out, use_container_width=True, hide_index=True)
 
         tickets_name = sanitize_txt_filename(st.text_input("Nazwa pliku kuponów .txt", value="kupony.txt"))
         st.download_button(
