@@ -186,6 +186,15 @@ LIGHT_GREEN_CSS = """
   box-shadow: 0 8px 18px rgba(0,0,0,.05);
 }
 
+.rank-card-gold{
+  background: linear-gradient(135deg, #fff8e1 0%, #ffecb3 100%);
+  border: 2px solid #ffc107;
+  border-radius: 16px;
+  padding: 18px;
+  margin: 15px 0;
+  box-shadow: 0 12px 24px rgba(255, 193, 7, 0.2);
+}
+
 .rank-title{
   font-size: 1.05rem;
   font-weight: 900;
@@ -193,11 +202,27 @@ LIGHT_GREEN_CSS = """
   color:#000000 !important;
 }
 
+.rank-title-gold{
+  font-size: 1.3rem;
+  font-weight: 900;
+  margin-bottom: 8px;
+  color:#d4af37 !important;
+  text-shadow: 1px 1px 0px rgba(0,0,0,0.1);
+}
+
 .rank-main{
   font-size: 1.2rem;
   font-weight: 1000;
   letter-spacing: .8px;
   margin-bottom: 6px;
+  color:#000000 !important;
+}
+
+.rank-main-gold{
+  font-size: 1.8rem;
+  font-weight: 1000;
+  letter-spacing: 2px;
+  margin-bottom: 10px;
   color:#000000 !important;
 }
 
@@ -235,6 +260,12 @@ div.stButton > button[kind="primary"]:hover{
   transform: translateY(-1px);
 }
 
+.btn-gold > button{
+  background: linear-gradient(90deg, #d4af37 0%, #ffdf00 100%) !important;
+  color: #000 !important;
+  box-shadow: 0 10px 22px rgba(212, 175, 55, 0.4) !important;
+}
+
 button[kind="header"]{
   opacity: 1 !important;
   visibility: visible !important;
@@ -243,6 +274,7 @@ button[kind="header"]{
 @media (max-width: 640px){
   div.stButton > button[kind="primary"]{ width: 100% !important; }
   .rank-main{ font-size: 1.05rem; }
+  .rank-main-gold{ font-size: 1.4rem; }
 }
 </style>
 """
@@ -383,6 +415,26 @@ def render_wielka_szansa_cards(details: List[Dict]) -> None:
             """,
             unsafe_allow_html=True
         )
+
+def render_zloty_strzal_card(zs_data: Dict) -> None:
+    nums_str = " ".join(f"{x:02d}" for x in zs_data["kupon"])
+    ev, od = even_odd_split(zs_data["kupon"])
+    pairs = count_adjacent_pairs(sorted(zs_data["kupon"]))
+    
+    st.markdown(
+        f"""
+<div class="rank-card-gold">
+  <div class="rank-title-gold">🌟 MISTRZOWSKI KUPON (MOMENTUM SCORE)</div>
+  <div class="rank-main-gold">{nums_str}</div>
+  <div class="rank-meta">
+    <b>Dlaczego ten zestaw?</b> Algorytm przeanalizował zyski punktowe z ostatnich 30 oraz 999 losowań, weryfikując cykl uśpienia dla każdej z 49 liczb.<br><br>
+    Parzyste/Nieparzyste: <b>{ev}/{od}</b> | Pary kolejne: <b>{pairs}</b><br>
+    Średni Momentum Score kuponu: <b>{zs_data['sredni_score']:.2f} pkt</b>
+  </div>
+</div>
+        """,
+        unsafe_allow_html=True
+    )
 
 # =========================================================
 # PDF PARSING
@@ -790,6 +842,84 @@ def build_positional_difference_set(draws: List[List[int]], window: int) -> Dict
     return {"set": result, "details": details, "window_used": len(subset)}
 
 # =========================================================
+# ZŁOTY STRZAŁ (MOMENTUM AI) - NOWOŚĆ!
+# =========================================================
+def build_zloty_strzal_momentum(draws: List[List[int]]) -> Dict:
+    """
+    Profesjonalny algorytm obliczający Momentum (trend).
+    Zamiast ślepo brać "najczęstsze w historii 999", algorytm waży:
+    1. Siłę w krótkim oknie (np. ost. 30 losowań) - waga 50%
+    2. Siłę w długim oknie (np. ost. 999 losowań) - waga 30%
+    3. Cykl uśpienia (jak dawno padła) - waga 20%
+    """
+    if not draws:
+        return {"kupon": list(range(1, 7)), "sredni_score": 0.0, "details": []}
+
+    short_window = 30
+    long_window = 999
+    
+    draws_short = draws[:min(short_window, len(draws))]
+    draws_long = draws[:min(long_window, len(draws))]
+
+    short_counts = Counter()
+    for d in draws_short:
+        for n in set(d): short_counts[n] += 1
+            
+    long_counts = Counter()
+    for d in draws_long:
+        for n in set(d): long_counts[n] += 1
+
+    last_seen = {}
+    for n in range(NUM_MIN, NUM_MAX + 1):
+        last_seen[n] = 9999
+        for idx, d in enumerate(draws):
+            if n in d:
+                last_seen[n] = idx
+                break
+
+    scores = []
+    for n in range(NUM_MIN, NUM_MAX + 1):
+        # 1. Obliczenie wartości bazowych
+        short_rate = short_counts.get(n, 0) / max(1, len(draws_short))
+        long_rate = long_counts.get(n, 0) / max(1, len(draws_long))
+        
+        # 2. Obliczenie premii uśpienia (chcemy liczby które mają lekką "zaległość", ale nie te martwe)
+        # Załóżmy, że idealny czas oczekiwania to około 6-12 losowań.
+        delay = last_seen[n]
+        delay_score = 0.0
+        if 4 <= delay <= 15:
+            delay_score = 1.0
+        elif delay < 4:
+            delay_score = 0.5 # Padła niedawno, spoko, ale bez premii extra
+        else:
+            delay_score = max(0.0, 1.0 - (delay - 15) * 0.05) # Im starsza, tym gorsza
+
+        # 3. Formuła Momentum
+        momentum = (short_rate * 50.0) + (long_rate * 30.0) + (delay_score * 20.0)
+        
+        scores.append({
+            "liczba": n,
+            "short_rate": short_rate,
+            "long_rate": long_rate,
+            "delay": delay,
+            "momentum": momentum
+        })
+
+    # Sortowanie po najsilniejszym momentum
+    scores.sort(key=lambda x: x["momentum"], reverse=True)
+    
+    # Wybieramy TOP 6
+    best_6 = scores[:PICK_COUNT]
+    ticket = sorted([item["liczba"] for item in best_6])
+    avg_score = sum([item["momentum"] for item in best_6]) / PICK_COUNT
+
+    return {
+        "kupon": ticket,
+        "sredni_score": avg_score,
+        "details": scores[:15] # Do podglądu oddajemy TOP 15
+    }
+
+# =========================================================
 # SCORE TICKET (SHARED BY TURBO & NEW ENGINE)
 # =========================================================
 def similarity_to_recent(ticket: List[int], recent_draws: List[List[int]]) -> int:
@@ -888,7 +1018,6 @@ def run_new_stronger_engine(
     for t in candidates:
         scored.append(score_ticket(list(t), percent_map, pair_counter, triple_counter, target_profile, recent_draws))
 
-    # Sort candidates purely by the newly designed score descending
     scored.sort(key=lambda x: x["final_score"], reverse=True)
     best = scored[:n_tickets]
 
@@ -1351,6 +1480,19 @@ def make_txt_for_wielka_szansa(ws: Dict, selected_window: int) -> bytes:
         lines.append(f"Pozycja {d['Pozycja']} | ostatnia={d['Ostatnia wartość']} | prognoza surowa={d['Prognoza']} | prognoza po korekcie={d['Prognoza_po_korekcie']} | pewność={d['Pewność %']} | metoda={d['Metoda']}")
     return ("\n".join(lines) + "\n").encode("utf-8")
 
+def make_txt_for_zloty_strzal(zs_data: Dict) -> bytes:
+    nums = " ".join(f"{x:02d}" for x in zs_data["kupon"])
+    lines = [
+        "🌟 ZŁOTY STRZAŁ (MOMENTUM SCORE)",
+        f"Kupon mistrzowski: {nums}",
+        f"Średni Momentum Score: {zs_data['sredni_score']:.2f}",
+        "",
+        "Szczegóły TOP 15 liczb według wskaźnika Momentum:"
+    ]
+    for d in zs_data["details"]:
+        lines.append(f"Liczba: {d['liczba']:02d} | Momentum: {d['momentum']:.2f} | Śledzenie (ost.30): {d['short_rate']:.3f} | Śledzenie (ost.999): {d['long_rate']:.3f} | Opóźnienie: {d['delay']}")
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
 # =========================================================
 # FEATURE DESCRIPTIONS
 # =========================================================
@@ -1358,6 +1500,8 @@ def render_feature_descriptions():
     with st.expander("📘 Opisy funkcji aplikacji", expanded=False):
         st.markdown("""
 **🏆 Generuj kupony** Tworzy kupony zgodnie z wybranym silnikiem oraz trybem. Nowy Mocniejszy Silnik losuje tysiące wariantów dla każdego kuponu z puli gorących i wybiera tylko te z najwyższym scorem.
+
+**🌟 Złoty Strzał (Momentum)** Super-algorytm obliczający pęd dla każdej z 49 liczb. Łączy siłę z ostatnich 30 losowań (trend), 999 losowań (baza) oraz nagradza liczby wychodzące z uśpienia. Pokazuje jeden, z perspektywy Data Science, najsilniejszy zestaw.
 
 **🌿 Szczęśliwe cyfry dnia** Buduje zestaw dnia na podstawie ostatnich losowań, balansu parzyste/nieparzyste, niskie/wysokie i rozstrzału.
 
@@ -1506,13 +1650,13 @@ def main():
 
     st.title(APP_TITLE)
     st.write("Generator typowań Lotto na bazie historii losowań z pliku **wyniki.pdf** / **wynik.pdf** (1–49, typuje 6 liczb).")
-    st.caption("Nowość: Możliwość wyboru między klasyczną (starą) metodą, a Nowym Mocniejszym Silnikiem (Rankingowym).")
 
     session_defaults = {
         "last_records": [], "last_daily": None, "show_results": False,
         "hot_master_set": None, "difference_set": None, "hot_max_set": None,
         "turbo_score_result": None, "premium_result": None, "ai_sim_result": None,
         "cycle_result": None, "heatmap_df": None, "wielka_szansa_result": None,
+        "zloty_strzal_result": None,
     }
     for key, value in session_defaults.items():
         if key not in st.session_state: st.session_state[key] = value
@@ -1555,6 +1699,7 @@ def main():
     history_window_used = min(cfg["history_window"], len(result_records_all))
     result_records = result_records_all[:history_window_used]
     draws = [r["nums"] for r in result_records]
+    all_draws_full = [r["nums"] for r in result_records_all]
 
     percent_df = compute_presence_percent_df_cached(draws)
     hot, cold, _neutral = build_groups_from_percent(percent_df, hot_size=cfg["hot_size"], cold_size=cfg["cold_size"])
@@ -1594,6 +1739,12 @@ def main():
     st.markdown('<div class="v-card">', unsafe_allow_html=True)
     st.subheader("🎟️ Narzędzia")
 
+    # Sekcja dla Złotego Strzału
+    st.markdown('<div class="btn-gold">', unsafe_allow_html=True)
+    zloty_strzal_btn = st.button("🌟 ZŁOTY STRZAŁ (MOMENTUM SCORE)", use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.write("")
+
     c1, c2, c3, c4 = st.columns(4, gap="large")
     with c1:
         generate = st.button("🏆 GENERUJ KUPONY", type="primary", use_container_width=True)
@@ -1618,13 +1769,16 @@ def main():
 
     if show_res: st.session_state["show_results"] = not st.session_state["show_results"]
     if show_hot_set: st.session_state["hot_master_set"] = hot_master_set
+    
+    if zloty_strzal_btn:
+        st.session_state["zloty_strzal_result"] = build_zloty_strzal_momentum(all_draws_full)
 
     if build_diff_set:
-        diff_data = build_positional_difference_set([r["nums"] for r in result_records_all], cfg["difference_window"])
+        diff_data = build_positional_difference_set(all_draws_full, cfg["difference_window"])
         st.session_state["difference_set"] = diff_data
 
     if build_wielka_szansa:
-        ws_data = build_wielka_szansa_set([r["nums"] for r in result_records_all], cfg["wielka_szansa_window"])
+        ws_data = build_wielka_szansa_set(all_draws_full, cfg["wielka_szansa_window"])
         st.session_state["wielka_szansa_result"] = ws_data
 
     mode_ui = cfg["mode_ui"]
@@ -1763,6 +1917,17 @@ def main():
     # =========================================================
     # OUTPUT SECTIONS
     # =========================================================
+    
+    if st.session_state.get("zloty_strzal_result") is not None:
+        zs = st.session_state["zloty_strzal_result"]
+        render_zloty_strzal_card(zs)
+        with st.expander("📊 Zobacz statystyki Momentum (Dlaczego te liczby?)"):
+            df_zs = pd.DataFrame(zs["details"])
+            st.dataframe(df_zs, use_container_width=True, hide_index=True)
+            
+        zloty_name = sanitize_txt_filename(st.text_input("Nazwa pliku Złoty Strzał .txt", value="zloty_strzal.txt"))
+        st.download_button("⬇️ Pobierz Złoty Strzał jako TXT", data=make_txt_for_zloty_strzal(zs), file_name=zloty_name, mime="text/plain", use_container_width=True)
+    
     if st.session_state["show_results"]:
         st.markdown("### 📋 Ostatnie wyniki (z PDF)")
         count_choice = st.selectbox("Ile ostatnich wyników pokazać?", [10, 50, 100], index=0)
