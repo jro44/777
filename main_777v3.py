@@ -427,7 +427,7 @@ def render_zloty_strzal_card(zs_data: Dict) -> None:
   <div class="rank-title-gold">🌟 MISTRZOWSKI KUPON (MOMENTUM SCORE)</div>
   <div class="rank-main-gold">{nums_str}</div>
   <div class="rank-meta">
-    <b>Dlaczego ten zestaw?</b> Algorytm przeanalizował zyski punktowe z ostatnich 30 oraz 999 losowań, weryfikując cykl uśpienia dla każdej z 49 liczb.<br><br>
+    <b>Dlaczego ten zestaw?</b> Algorytm przeanalizował Momentum wszystkich 49 liczb i wylosował probabilistycznie te, które mają najsilniejszy trend. Każde kliknięcie generuje <b>inny, unikalny kupon</b> oparty o czołówkę rankingu!<br><br>
     Parzyste/Nieparzyste: <b>{ev}/{od}</b> | Pary kolejne: <b>{pairs}</b><br>
     Średni Momentum Score kuponu: <b>{zs_data['sredni_score']:.2f} pkt</b>
   </div>
@@ -842,15 +842,14 @@ def build_positional_difference_set(draws: List[List[int]], window: int) -> Dict
     return {"set": result, "details": details, "window_used": len(subset)}
 
 # =========================================================
-# ZŁOTY STRZAŁ (MOMENTUM AI) - NOWOŚĆ!
+# ZŁOTY STRZAŁ (MOMENTUM AI) - WERSJA STOCHASTYCZNA
 # =========================================================
 def build_zloty_strzal_momentum(draws: List[List[int]]) -> Dict:
     """
-    Profesjonalny algorytm obliczający Momentum (trend).
-    Zamiast ślepo brać "najczęstsze w historii 999", algorytm waży:
-    1. Siłę w krótkim oknie (np. ost. 30 losowań) - waga 50%
-    2. Siłę w długim oknie (np. ost. 999 losowań) - waga 30%
-    3. Cykl uśpienia (jak dawno padła) - waga 20%
+    Algorytm obliczający Momentum (trend) w wersji STOCHASTYCZNEJ.
+    Zamiast ślepo brać zawsze "TOP 6", oblicza szanse na wylosowanie 
+    proporcjonalnie do siły Momentum każdej z liczb. Pozwala to na
+    uzyskiwanie unikalnych kuponów przy każdym kliknięciu.
     """
     if not draws:
         return {"kupon": list(range(1, 7)), "sredni_score": 0.0, "details": []}
@@ -883,18 +882,17 @@ def build_zloty_strzal_momentum(draws: List[List[int]]) -> Dict:
         short_rate = short_counts.get(n, 0) / max(1, len(draws_short))
         long_rate = long_counts.get(n, 0) / max(1, len(draws_long))
         
-        # 2. Obliczenie premii uśpienia (chcemy liczby które mają lekką "zaległość", ale nie te martwe)
-        # Załóżmy, że idealny czas oczekiwania to około 6-12 losowań.
+        # 2. Obliczenie premii uśpienia
         delay = last_seen[n]
         delay_score = 0.0
         if 4 <= delay <= 15:
             delay_score = 1.0
         elif delay < 4:
-            delay_score = 0.5 # Padła niedawno, spoko, ale bez premii extra
+            delay_score = 0.5 
         else:
-            delay_score = max(0.0, 1.0 - (delay - 15) * 0.05) # Im starsza, tym gorsza
+            delay_score = max(0.0, 1.0 - (delay - 15) * 0.05) 
 
-        # 3. Formuła Momentum
+        # 3. Formuła Momentum bazowego
         momentum = (short_rate * 50.0) + (long_rate * 30.0) + (delay_score * 20.0)
         
         scores.append({
@@ -905,18 +903,33 @@ def build_zloty_strzal_momentum(draws: List[List[int]]) -> Dict:
             "momentum": momentum
         })
 
-    # Sortowanie po najsilniejszym momentum
+    # Sortowanie tablicy details do wyświetlenia topki
     scores.sort(key=lambda x: x["momentum"], reverse=True)
     
-    # Wybieramy TOP 6
-    best_6 = scores[:PICK_COUNT]
-    ticket = sorted([item["liczba"] for item in best_6])
-    avg_score = sum([item["momentum"] for item in best_6]) / PICK_COUNT
+    # 4. Losowanie ważone (Weighted Random Sampling Without Replacement)
+    # Tworzymy pule i wagi, podnosząc momentum do potęgi 1.5, żeby BARDZO 
+    # mocno faworyzować liczby z czołówki, ale dać szansę innym silnym.
+    population = [item["liczba"] for item in scores]
+    raw_weights = [item["momentum"] ** 1.5 for item in scores]
+    
+    weight_sum = sum(raw_weights)
+    if weight_sum > 0:
+        probs = [w / weight_sum for w in raw_weights]
+    else:
+        probs = [1.0 / len(raw_weights)] * len(raw_weights)
+
+    # Korzystamy z biblioteki numpy do wygenerowania 6 unikalnych wariantów z szansą wg probs
+    chosen = np.random.choice(population, size=PICK_COUNT, replace=False, p=probs)
+    ticket = sorted(chosen.tolist())
+    
+    # Obliczamy faktyczny bazowy uśredniony Momentum Score dla ułożonego kuponu
+    drawn_momentum_sum = sum(item["momentum"] for item in scores if item["liczba"] in ticket)
+    avg_score = drawn_momentum_sum / PICK_COUNT
 
     return {
         "kupon": ticket,
         "sredni_score": avg_score,
-        "details": scores[:15] # Do podglądu oddajemy TOP 15
+        "details": scores[:15] # Zawsze wyświetlaj top 15 dla statystyk
     }
 
 # =========================================================
@@ -1501,7 +1514,7 @@ def render_feature_descriptions():
         st.markdown("""
 **🏆 Generuj kupony** Tworzy kupony zgodnie z wybranym silnikiem oraz trybem. Nowy Mocniejszy Silnik losuje tysiące wariantów dla każdego kuponu z puli gorących i wybiera tylko te z najwyższym scorem.
 
-**🌟 Złoty Strzał (Momentum)** Super-algorytm obliczający pęd dla każdej z 49 liczb. Łączy siłę z ostatnich 30 losowań (trend), 999 losowań (baza) oraz nagradza liczby wychodzące z uśpienia. Pokazuje jeden, z perspektywy Data Science, najsilniejszy zestaw.
+**🌟 Złoty Strzał (Momentum)** Super-algorytm obliczający pęd dla każdej z 49 liczb. Łączy siłę z ostatnich 30 losowań (trend), 999 losowań (baza) oraz nagradza liczby wychodzące z uśpienia. Losuje unikalny zestaw, silnie faworyzując TOP rankingu!
 
 **🌿 Szczęśliwe cyfry dnia** Buduje zestaw dnia na podstawie ostatnich losowań, balansu parzyste/nieparzyste, niskie/wysokie i rozstrzału.
 
