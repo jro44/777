@@ -352,7 +352,8 @@ def build_candidates(
     last_draw = draws[0] if draws else []
     feat_map = feature_df.set_index("Liczba").to_dict("index")
     
-    weights = {n: max((r["BaseStrength_Norm"] * 0.5 + r["WeibullHazard_Norm"] * 0.3 + r["Momentum_Norm"] * 0.2), 0.001) for n, r in feature_df.iterrows()}
+    weights = {int(r["Liczba"]): max((r["BaseStrength_Norm"] * 0.5 + r["WeibullHazard_Norm"] * 0.3 + r["Momentum_Norm"] * 0.2), 0.001) for _, r in feature_df.iterrows()}
+
     
     elite_pool = feature_df.head(cfg.elite_pool_size)["Liczba"].tolist()
     soft_pool = feature_df.head(cfg.soft_pool_size)["Liczba"].tolist()
