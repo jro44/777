@@ -7,7 +7,7 @@ import itertools
 from dataclasses import dataclass
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 
 import fitz  # PyMuPDF
 import streamlit as st
@@ -18,7 +18,7 @@ import streamlit as st
 # ============================================================
 
 APP_TITLE = "🎯 Generator Lotto PRO"
-APP_SUBTITLE = "Analiza PDF + rytmika liczb + powtarzalne układy historyczne + inteligentne kupony Lotto 6/49"
+APP_SUBTITLE = "Analiza PDF + rytmika liczb + układy historyczne + gorące/zimne liczby + tryb Bystrzacha"
 
 DEFAULT_PDF = "wyniki.pdf"
 PDF_CANDIDATES = ["wyniki.pdf", "wynik.pdf"]
@@ -41,6 +41,9 @@ DEFAULT_WEIGHT_OVERDUE = 0.05
 
 DEFAULT_HOT_POOL = 24
 DEFAULT_GENERATION_ATTEMPTS = 7000
+
+DEFAULT_ENABLE_BYSTRZACHA = True
+DEFAULT_BYSTRZACHA_TOP_DELTAS = 10
 
 INT_RE = re.compile(r"\d+")
 
@@ -70,6 +73,8 @@ class AnalyzerConfig:
     rule_force_spread: bool
     rule_force_sum_range: bool
     rule_avoid_last_draw_clone: bool
+    enable_bystrzacha: bool
+    bystrzacha_top_deltas: int
 
 
 # ============================================================
@@ -262,9 +267,7 @@ def parse_lotto_pdf(pdf_source, max_draws: int = 999) -> Tuple[List[Draw], Dict]
         draws = draws[:max_draws]
 
     if not draws:
-        raise ValueError(
-            "Po deduplikacji nie pozostały żadne losowania do analizy."
-        )
+        raise ValueError("Po deduplikacji nie pozostały żadne losowania do analizy.")
 
     diagnostics = {
         "pages_total": pages_total,
@@ -304,9 +307,12 @@ class LottoAnalyzer:
         self.position_counter = [Counter() for _ in range(NUMBERS_IN_DRAW)]
 
         self.intervals = {}
+        self.positional_delta_counters: List[Counter] = [Counter() for _ in range(NUMBERS_IN_DRAW)]
+        self.positional_direction_counters: List[Counter] = [Counter() for _ in range(NUMBERS_IN_DRAW)]
 
         self._analyze()
         self.intervals = self._analyze_intervals()
+        self._analyze_positional_deltas()
 
     def _sort_draws(self, draws: List[Draw]) -> List[Draw]:
         with_id = [d for d in draws if d.draw_id is not None]
@@ -378,6 +384,26 @@ class LottoAnalyzer:
                     intervals_data[n]["overdue_factor"] = 0.0
 
         return intervals_data
+
+    def _analyze_positional_deltas(self):
+        chronological = list(reversed(self.draws))
+        if len(chronological) < 2:
+            return
+
+        for i in range(len(chronological) - 1):
+            current_draw = sorted(chronological[i].numbers)
+            next_draw = sorted(chronological[i + 1].numbers)
+
+            for pos in range(NUMBERS_IN_DRAW):
+                delta = next_draw[pos] - current_draw[pos]
+                self.positional_delta_counters[pos][delta] += 1
+
+                if delta > 0:
+                    self.positional_direction_counters[pos]["góra"] += 1
+                elif delta < 0:
+                    self.positional_direction_counters[pos]["dół"] += 1
+                else:
+                    self.positional_direction_counters[pos]["bez zmiany"] += 1
 
     def get_last_draw(self) -> Optional[Draw]:
         return self.draws[0] if self.draws else None
@@ -520,18 +546,6 @@ class LottoAnalyzer:
         return score + pair_bonus + triple_bonus + rhythm_bonus + diversity_penalty
 
     def _split_hot_cold_numbers(self, ranked_numbers: List[int]) -> Tuple[List[int], List[int]]:
-        """
-        Zwraca dwie pule:
-        - hot_numbers: liczby gorące
-        - cold_numbers: liczby zimne
-
-        Zasada:
-        - hot_pool == 49 -> wszystkie liczby traktowane jako gorące
-        - hot_pool == 0  -> wszystkie liczby traktowane jako zimne
-        - w innym przypadku:
-            hot = top N
-            cold = reszta rankingu
-        """
         hp = self.config.hot_pool
 
         if hp >= 49:
@@ -544,18 +558,9 @@ class LottoAnalyzer:
             hot_numbers = ranked_numbers[:hp]
             cold_numbers = ranked_numbers[hp:]
 
-            if not cold_numbers:
-                cold_numbers = ranked_numbers[hp:]
-
         return hot_numbers, cold_numbers
 
     def _build_candidate_pool(self, ranked_numbers: List[int]) -> List[int]:
-        """
-        Główna pula do budowy kuponów:
-        - hot_pool == 49 -> tylko gorące
-        - hot_pool == 0  -> tylko zimne
-        - w innych przypadkach -> preferowane gorące
-        """
         hot_numbers, cold_numbers = self._split_hot_cold_numbers(ranked_numbers)
 
         if self.config.hot_pool >= 49:
@@ -565,6 +570,198 @@ class LottoAnalyzer:
             return cold_numbers[:]
 
         return hot_numbers[:]
+
+    def _build_bystrzacha_position_options(self) -> List[List[Tuple[int, float, int]]]:
+        """
+        Dla każdej pozycji zwraca listę kandydatów:
+        (predicted_value, score, delta)
+        """
+        last_draw = self.get_last_draw()
+        if not last_draw:
+            return []
+
+        latest = sorted(last_draw.numbers)
+        options_per_position: List[List[Tuple[int, float, int]]] = []
+
+        for pos in range(NUMBERS_IN_DRAW):
+            counter = self.positional_delta_counters[pos]
+            base_value = latest[pos]
+            position_options: List[Tuple[int, float, int]] = []
+
+            top_deltas = counter.most_common(max(1, self.config.bystrzacha_top_deltas))
+
+            for rank_index, (delta, freq) in enumerate(top_deltas):
+                predicted = base_value + delta
+                if LOTTO_MIN <= predicted <= LOTTO_MAX:
+                    # lekka premia za wyższą częstość i za lepszą pozycję w rankingu
+                    score = float(freq) - (rank_index * 0.05)
+                    position_options.append((predicted, score, delta))
+
+            # fallback: bez zmiany pozycji
+            position_options.append((base_value, 0.01, 0))
+
+            # deduplikacja predicted value — zostaw najwyższy score
+            best_map: Dict[int, Tuple[int, float, int]] = {}
+            for predicted, score, delta in position_options:
+                if predicted not in best_map or score > best_map[predicted][1]:
+                    best_map[predicted] = (predicted, score, delta)
+
+            final_position_options = sorted(best_map.values(), key=lambda x: (-x[1], x[0]))
+            options_per_position.append(final_position_options)
+
+        return options_per_position
+
+    def _search_best_bystrzacha_sequence(
+        self,
+        options_per_position: List[List[Tuple[int, float, int]]]
+    ) -> Tuple[List[int], List[int], float]:
+        """
+        Szuka najlepszego rosnącego i unikalnego układu 6 liczb.
+        Zwraca:
+        - liczby
+        - użyte delty
+        - score
+        """
+        best_numbers: Optional[List[int]] = None
+        best_deltas: Optional[List[int]] = None
+        best_score = float("-inf")
+
+        def backtrack(pos: int, chosen_nums: List[int], chosen_deltas: List[int], total_score: float):
+            nonlocal best_numbers, best_deltas, best_score
+
+            if pos == NUMBERS_IN_DRAW:
+                candidate = sorted(chosen_nums)
+                if len(set(candidate)) != NUMBERS_IN_DRAW:
+                    return
+                if not self.validate_ticket(candidate):
+                    return
+                if total_score > best_score:
+                    best_score = total_score
+                    best_numbers = candidate[:]
+                    best_deltas = chosen_deltas[:]
+                return
+
+            current_options = options_per_position[pos][:12]
+
+            for predicted, score, delta in current_options:
+                if predicted in chosen_nums:
+                    continue
+                if chosen_nums and predicted <= chosen_nums[-1]:
+                    continue
+
+                chosen_nums.append(predicted)
+                chosen_deltas.append(delta)
+                backtrack(pos + 1, chosen_nums, chosen_deltas, total_score + score)
+                chosen_nums.pop()
+                chosen_deltas.pop()
+
+        backtrack(0, [], [], 0.0)
+
+        if best_numbers is not None and best_deltas is not None:
+            return best_numbers, best_deltas, best_score
+
+        # fallback greedy
+        greedy_nums = []
+        greedy_deltas = []
+        for pos in range(NUMBERS_IN_DRAW):
+            picked = None
+            for predicted, score, delta in options_per_position[pos]:
+                if predicted in greedy_nums:
+                    continue
+                if greedy_nums and predicted <= greedy_nums[-1]:
+                    continue
+                picked = (predicted, score, delta)
+                break
+
+            if picked is None:
+                base = LOTTO_MIN if not greedy_nums else greedy_nums[-1] + 1
+                if base > LOTTO_MAX:
+                    base = LOTTO_MAX
+                picked = (base, 0.0, 0)
+
+            greedy_nums.append(picked[0])
+            greedy_deltas.append(picked[2])
+
+        greedy_nums = sorted(list(dict.fromkeys(greedy_nums)))
+        while len(greedy_nums) < NUMBERS_IN_DRAW:
+            for n in range(LOTTO_MIN, LOTTO_MAX + 1):
+                if n not in greedy_nums:
+                    greedy_nums.append(n)
+                    if len(greedy_nums) == NUMBERS_IN_DRAW:
+                        break
+
+        greedy_nums = sorted(greedy_nums[:NUMBERS_IN_DRAW])
+        return greedy_nums, greedy_deltas[:NUMBERS_IN_DRAW], 0.0
+
+    def generate_bystrzacha_ticket(self) -> Dict[str, Any]:
+        last_draw = self.get_last_draw()
+        if not last_draw:
+            return {
+                "Liczby Lotto 6/49": "-",
+                "Geneza": "Brak danych do analizy Bystrzachy.",
+                "Delta 1": "-",
+                "Delta 2": "-",
+                "Delta 3": "-",
+                "Delta 4": "-",
+                "Delta 5": "-",
+                "Delta 6": "-",
+                "Suma": "-",
+                "Parzyste": "-",
+                "Seria kolejnych": "-",
+                "Bystrzacha score": "-",
+            }
+
+        options_per_position = self._build_bystrzacha_position_options()
+        ticket, deltas, score = self._search_best_bystrzacha_sequence(options_per_position)
+
+        return {
+            "Liczby Lotto 6/49": format_number_list(ticket),
+            "Geneza": "Bystrzacha: najczęstsze zmiany pozycyjne między kolejnymi losowaniami",
+            "Delta 1": f"{deltas[0]:+d}" if len(deltas) > 0 else "-",
+            "Delta 2": f"{deltas[1]:+d}" if len(deltas) > 1 else "-",
+            "Delta 3": f"{deltas[2]:+d}" if len(deltas) > 2 else "-",
+            "Delta 4": f"{deltas[3]:+d}" if len(deltas) > 3 else "-",
+            "Delta 5": f"{deltas[4]:+d}" if len(deltas) > 4 else "-",
+            "Delta 6": f"{deltas[5]:+d}" if len(deltas) > 5 else "-",
+            "Suma": sum(ticket),
+            "Parzyste": count_even(ticket),
+            "Seria kolejnych": max_consecutive_run(ticket),
+            "Bystrzacha score": round(score, 4),
+        }
+
+    def get_bystrzacha_analysis_table(self) -> List[Dict]:
+        rows = []
+        for pos in range(NUMBERS_IN_DRAW):
+            counter = self.positional_delta_counters[pos]
+            directions = self.positional_direction_counters[pos]
+
+            top_changes = counter.most_common(8)
+            if not top_changes:
+                rows.append({
+                    "Pozycja": pos + 1,
+                    "Najczęstsze zmiany": "Brak danych",
+                    "Góra": 0,
+                    "Dół": 0,
+                    "Bez zmiany": 0,
+                    "Najmocniejsza delta": "-",
+                    "Wystąpienia": 0,
+                })
+                continue
+
+            top_changes_text = ", ".join([f"{delta:+d} ({cnt}x)" for delta, cnt in top_changes])
+            best_delta, best_count = top_changes[0]
+
+            rows.append({
+                "Pozycja": pos + 1,
+                "Najczęstsze zmiany": top_changes_text,
+                "Góra": directions.get("góra", 0),
+                "Dół": directions.get("dół", 0),
+                "Bez zmiany": directions.get("bez zmiany", 0),
+                "Najmocniejsza delta": f"{best_delta:+d}",
+                "Wystąpienia": best_count,
+            })
+
+        return rows
 
     def generate_smart_tickets(self, count: int = 6) -> List[Dict]:
         number_scores = self.compute_number_scores()
@@ -588,7 +785,25 @@ class LottoAnalyzer:
         results = []
         seen_tickets = set()
 
-        for ticket_index in range(count):
+        if self.config.enable_bystrzacha:
+            bystrzacha_ticket = self.generate_bystrzacha_ticket()
+            bt_numbers = [int(x) for x in bystrzacha_ticket["Liczby Lotto 6/49"].split()] if bystrzacha_ticket["Liczby Lotto 6/49"] != "-" else []
+            if len(bt_numbers) == NUMBERS_IN_DRAW:
+                seen_tickets.add(tuple(bt_numbers))
+                results.append({
+                    "Kupon": "B",
+                    "Liczby Lotto 6/49": bystrzacha_ticket["Liczby Lotto 6/49"],
+                    "Suma": bystrzacha_ticket["Suma"],
+                    "Parzyste": bystrzacha_ticket["Parzyste"],
+                    "Seria kolejnych": bystrzacha_ticket["Seria kolejnych"],
+                    "Geneza": f"🧠 {bystrzacha_ticket['Geneza']}",
+                })
+
+        normal_count = count
+        if self.config.enable_bystrzacha and len(results) > 0:
+            normal_count = max(0, count - 1)
+
+        for ticket_index in range(normal_count):
             best_ticket = None
             best_score = float("-inf")
             best_reason = "Ranking częstotliwość + rytm + układy"
@@ -617,9 +832,6 @@ class LottoAnalyzer:
 
                 current = set(base_nums)
 
-                # ====================================================
-                # TRYB 1: tylko gorące liczby (hot_pool == 49)
-                # ====================================================
                 if self.config.hot_pool >= 49:
                     working_pool = candidate_pool[:]
                     self.random.shuffle(working_pool)
@@ -631,9 +843,6 @@ class LottoAnalyzer:
 
                     nums = sorted(current)
 
-                # ====================================================
-                # TRYB 2: tylko zimne liczby (hot_pool == 0)
-                # ====================================================
                 elif self.config.hot_pool <= 0:
                     working_pool = candidate_pool[:]
                     self.random.shuffle(working_pool)
@@ -645,9 +854,6 @@ class LottoAnalyzer:
 
                     nums = sorted(current)
 
-                # ====================================================
-                # TRYB 3: standardowy mieszany — najpierw gorące, potem ewentualnie reszta
-                # ====================================================
                 else:
                     hot_candidates = hot_numbers[:]
                     self.random.shuffle(hot_candidates)
@@ -752,7 +958,7 @@ class LottoAnalyzer:
                 geneza_prefix = f"Tryb: top {self.config.hot_pool} gorących"
 
             results.append({
-                "Kupon": ticket_index + 1,
+                "Kupon": len(results) + 1 if not self.config.enable_bystrzacha else len(results),
                 "Liczby Lotto 6/49": format_number_list(best_ticket),
                 "Suma": sum(best_ticket),
                 "Parzyste": count_even(best_ticket),
@@ -760,7 +966,7 @@ class LottoAnalyzer:
                 "Geneza": f"{geneza_prefix} | {best_reason}",
             })
 
-        return results
+        return results[:count]
 
     def get_number_analysis_table(self) -> List[Dict]:
         scores = self.compute_number_scores()
@@ -914,7 +1120,8 @@ def render_header():
         <div class="app-card">
             <div class="small-note">
                 Ta aplikacja analizuje historię losowań Lotto 6/49 z pliku PDF, wyciąga częste układy,
-                sprawdza rytm występowania liczb i buduje inteligentne zestawy na podstawie historii.
+                sprawdza rytm występowania liczb, analizuje gorące i zimne liczby oraz potrafi
+                zbudować zestaw metodą <b>Bystrzachy</b> na podstawie zmian pozycyjnych między kolejnymi losowaniami.
                 <br><br>
                 <b>Ważne:</b> to nie jest gwarancja wygranej. To rozbudowany generator statystyczno-historyczny,
                 który tworzy sensowne, uporządkowane kupony zamiast całkowicie przypadkowych zestawów.
@@ -992,12 +1199,33 @@ def render_sidebar() -> Tuple[int, int, AnalyzerConfig]:
         step=1
     )
 
+    st.sidebar.subheader("🧠 Bystrzacha")
+    enable_bystrzacha = st.sidebar.checkbox(
+        "Włącz kupon Bystrzachy",
+        value=DEFAULT_ENABLE_BYSTRZACHA,
+        help="Analiza zmian pozycyjnych między kolejnymi losowaniami."
+    )
+
+    bystrzacha_top_deltas = st.sidebar.slider(
+        "Ile najmocniejszych zmian pozycyjnych brać pod uwagę?",
+        min_value=3,
+        max_value=20,
+        value=DEFAULT_BYSTRZACHA_TOP_DELTAS,
+        step=1,
+        help="Dla każdej z 6 pozycji Bystrzacha bierze pod uwagę top N najczęstszych zmian w górę lub w dół."
+    )
+
     if hot_pool == 49:
         st.sidebar.success("Tryb aktywny: losowanie tylko z gorących liczb.")
     elif hot_pool == 0:
         st.sidebar.warning("Tryb aktywny: losowanie tylko z zimnych liczb.")
     else:
         st.sidebar.info(f"Tryb aktywny: top {hot_pool} gorących liczb.")
+
+    if enable_bystrzacha:
+        st.sidebar.success("Bystrzacha aktywna: będzie liczony kupon pozycyjny.")
+    else:
+        st.sidebar.info("Bystrzacha wyłączona.")
 
     config = AnalyzerConfig(
         weight_freq=DEFAULT_WEIGHT_FREQ,
@@ -1013,6 +1241,8 @@ def render_sidebar() -> Tuple[int, int, AnalyzerConfig]:
         rule_force_spread=rule_spread,
         rule_force_sum_range=rule_sum_range,
         rule_avoid_last_draw_clone=rule_avoid_last_draw_clone,
+        enable_bystrzacha=enable_bystrzacha,
+        bystrzacha_top_deltas=bystrzacha_top_deltas,
     )
 
     return int(max_draws), int(tickets_count), config
@@ -1074,7 +1304,8 @@ def render_generated_tickets(analyzer: LottoAnalyzer, tickets_count: int):
                 <br>• buduje rdzeń kuponu na podstawie historii,
                 <br>• dopełnia go najsilniejszymi liczbami,
                 <br>• odrzuca układy skrajne,
-                <br>• może działać w trybie wyłącznie gorących albo wyłącznie zimnych liczb.
+                <br>• może działać w trybie wyłącznie gorących albo wyłącznie zimnych liczb,
+                <br>• może też dodać kupon <b>Bystrzachy</b>, liczony po zmianach pozycyjnych.
             </div>
         </div>
         """,
@@ -1129,6 +1360,39 @@ def render_patterns(analyzer: LottoAnalyzer):
         st.dataframe(patterns["quads"], use_container_width=True, height=420)
 
 
+def render_bystrzacha(analyzer: LottoAnalyzer):
+    st.subheader("🧠 Bystrzacha — analiza zmian pozycyjnych")
+
+    st.markdown(
+        """
+        <div class="app-card">
+            <div class="small-note">
+                Bystrzacha analizuje każdą pozycję osobno:
+                <br>• pozycja 1 → jak najczęściej zmieniała się 1. liczba między kolejnymi losowaniami,
+                <br>• pozycja 2 → jak zmieniała się 2. liczba,
+                <br>• ...
+                <br>• pozycja 6 → jak zmieniała się 6. liczba.
+                <br><br>
+                Przykład:
+                jeśli w jednym losowaniu na danej pozycji było 04, a w następnym 12,
+                to delta wynosi <b>+8</b>.
+                Jeśli takie przejście powtarzało się często, Bystrzacha bierze je pod uwagę przy typowaniu.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    bystrzacha_ticket = analyzer.generate_bystrzacha_ticket()
+
+    st.markdown("### Kupon Bystrzachy")
+    st.dataframe([bystrzacha_ticket], use_container_width=True, height=140)
+
+    st.markdown("### Analiza pozycji 1–6")
+    table = analyzer.get_bystrzacha_analysis_table()
+    st.dataframe(table, use_container_width=True, height=420)
+
+
 def render_diagnostics(diagnostics: Dict):
     st.subheader("🛠️ Diagnostyka parsowania PDF")
 
@@ -1178,6 +1442,7 @@ def main():
         tabs = st.tabs([
             "📊 Podsumowanie",
             "🎟️ Kupony",
+            "🧠 Bystrzacha",
             "🔢 Liczby 1–49",
             "🧩 Układy historyczne",
             "🛠️ Diagnostyka"
@@ -1190,12 +1455,15 @@ def main():
             render_generated_tickets(analyzer, tickets_count)
 
         with tabs[2]:
-            render_numbers_analysis(analyzer)
+            render_bystrzacha(analyzer)
 
         with tabs[3]:
-            render_patterns(analyzer)
+            render_numbers_analysis(analyzer)
 
         with tabs[4]:
+            render_patterns(analyzer)
+
+        with tabs[5]:
             render_diagnostics(diagnostics)
 
     except Exception as e:
