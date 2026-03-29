@@ -6,6 +6,7 @@ import random
 import itertools
 from dataclasses import dataclass
 from collections import Counter, defaultdict
+from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 
 import fitz  # PyMuPDF
@@ -20,10 +21,12 @@ APP_TITLE = "🎯 Generator Lotto PRO"
 APP_SUBTITLE = "Analiza PDF + rytmika liczb + powtarzalne układy historyczne + inteligentne kupony Lotto 6/49"
 
 DEFAULT_PDF = "wyniki.pdf"
+PDF_CANDIDATES = ["wyniki.pdf", "wynik.pdf"]
 
 LOTTO_MIN = 1
 LOTTO_MAX = 49
 NUMBERS_IN_DRAW = 6
+DRAWNO_MIN = 1000
 
 MAX_DRAWS_DEFAULT = 999
 DEFAULT_TICKETS_COUNT = 6
@@ -39,6 +42,8 @@ DEFAULT_WEIGHT_OVERDUE = 0.05
 DEFAULT_HOT_POOL = 24
 DEFAULT_GENERATION_ATTEMPTS = 7000
 
+INT_RE = re.compile(r"\d+")
+
 
 # ============================================================
 # MODELE DANYCH
@@ -46,7 +51,7 @@ DEFAULT_GENERATION_ATTEMPTS = 7000
 
 @dataclass
 class Draw:
-    draw_id: int
+    draw_id: Optional[int]
     numbers: List[int]
 
 
@@ -128,250 +133,157 @@ def make_bytesio_from_upload(uploaded_file) -> io.BytesIO:
     return io.BytesIO(uploaded_file.read())
 
 
-def open_pdf_document(pdf_source):
+def resolve_pdf_path() -> Path:
+    cwd = Path(os.getcwd())
+    for name in PDF_CANDIDATES:
+        p = cwd / name
+        if p.exists():
+            return p
+    return cwd / PDF_CANDIDATES[0]
+
+
+def resolve_pdf_source(uploaded_file, default_path: str):
+    if uploaded_file is not None:
+        return make_bytesio_from_upload(uploaded_file)
+
+    if os.path.exists(default_path):
+        return default_path
+
+    auto_path = resolve_pdf_path()
+    if auto_path.exists():
+        return str(auto_path)
+
+    return None
+
+
+def read_pdf_bytes(pdf_source) -> bytes:
     if isinstance(pdf_source, str):
         if not os.path.exists(pdf_source):
             raise FileNotFoundError(f"Nie znaleziono pliku: {pdf_source}")
-        return fitz.open(pdf_source)
+        with open(pdf_source, "rb") as f:
+            return f.read()
 
     if isinstance(pdf_source, bytes):
-        return fitz.open(stream=pdf_source, filetype="pdf")
+        return pdf_source
 
     if isinstance(pdf_source, io.BytesIO):
-        return fitz.open(stream=pdf_source.getvalue(), filetype="pdf")
+        return pdf_source.getvalue()
 
     raise TypeError("Nieobsługiwany typ źródła PDF.")
 
 
 # ============================================================
-# PARSER PDF
+# PARSER PDF — ODCZYT JAK W SPRAWDZONYM KODZIE
 # ============================================================
 
-def clean_token(token: str) -> str:
-    return token.strip()
+@st.cache_data(show_spinner=False)
+def load_records_cached(pdf_bytes: bytes) -> List[Draw]:
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise ValueError("Brak nagłówka %PDF.")
 
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        pages = [page.get_text("text") or "" for page in doc]
 
-def is_footer_or_header_text(text: str) -> bool:
-    low = text.lower().strip()
-    if not low:
-        return True
+    all_tokens: List[int] = []
+    all_drawnos: List[int] = []
 
-    bad_parts = [
-        "www.multipasko.pl",
-        "multipasko.pl",
-        "©",
-        "lotto 6/49",
-        "lotto",
-    ]
-    return any(part in low for part in bad_parts)
+    for page_text in pages:
+        lines = [re.sub(r"\s+", " ", ln.strip()) for ln in page_text.splitlines() if ln.strip()]
+        drawno_mode = False
 
+        for ln in lines:
+            ln_lower = ln.lower()
 
-def extract_int_tokens(text: str) -> List[str]:
-    return re.findall(r"\b\d+\b", text)
-
-
-def group_words_into_lines(words, y_threshold: float = 8.0) -> List[List[str]]:
-    """
-    Grupuje słowa zwrócone przez page.get_text("words") do linii
-    na podstawie współrzędnej Y.
-    """
-    prepared = []
-
-    for w in words:
-        x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], str(w[4]).strip()
-        if not text:
-            continue
-        if is_footer_or_header_text(text):
-            continue
-
-        mid_y = (y0 + y1) / 2.0
-        prepared.append((mid_y, x0, text))
-
-    prepared.sort(key=lambda item: (round(item[0], 1), item[1]))
-
-    lines = []
-    current_line = []
-    current_y = None
-
-    for mid_y, x0, text in prepared:
-        if current_y is None:
-            current_line = [(x0, text)]
-            current_y = mid_y
-            continue
-
-        if abs(mid_y - current_y) <= y_threshold:
-            current_line.append((x0, text))
-            current_y = (current_y + mid_y) / 2.0
-        else:
-            current_line.sort(key=lambda item: item[0])
-            lines.append([txt for _, txt in current_line])
-            current_line = [(x0, text)]
-            current_y = mid_y
-
-    if current_line:
-        current_line.sort(key=lambda item: item[0])
-        lines.append([txt for _, txt in current_line])
-
-    return lines
-
-
-def extract_page_candidates_from_words(page) -> Tuple[List[List[int]], List[int]]:
-    """
-    Próbuje odczytać wiersze liczb i ID losowań metodą opartą o współrzędne słów.
-    """
-    words = page.get_text("words")
-    lines = group_words_into_lines(words, y_threshold=8.0)
-
-    numbers_rows = []
-    draw_ids = []
-
-    for line_tokens in lines:
-        joined = " ".join(line_tokens)
-        numeric_tokens = extract_int_tokens(joined)
-
-        if not numeric_tokens:
-            continue
-
-        # Dokładnie 6 liczb z zakresu 1..49
-        if len(numeric_tokens) == NUMBERS_IN_DRAW:
-            nums = [int(t) for t in numeric_tokens]
-            if all(LOTTO_MIN <= n <= LOTTO_MAX for n in nums) and len(set(nums)) == NUMBERS_IN_DRAW:
-                numbers_rows.append(sorted(nums))
+            if any(skip in ln_lower for skip in ["lotto 6/49", "www.", "©", "multipasko"]):
                 continue
 
-        # Pojedynczy 4-cyfrowy numer losowania
-        if len(numeric_tokens) == 1 and len(numeric_tokens[0]) == 4:
-            val = int(numeric_tokens[0])
-            if 6000 <= val <= 9999:
-                draw_ids.append(val)
+            ints = [int(x) for x in INT_RE.findall(ln)]
+            if not ints:
                 continue
 
-    return numbers_rows, draw_ids
+            if any(x >= DRAWNO_MIN for x in ints) and not any(LOTTO_MIN <= x <= LOTTO_MAX for x in ints):
+                drawno_mode = True
 
+            if not drawno_mode:
+                all_tokens.extend(x for x in ints if LOTTO_MIN <= x <= LOTTO_MAX)
+            else:
+                all_drawnos.extend(x for x in ints if DRAWNO_MIN <= x < 100000)
 
-def extract_page_candidates_from_text(page) -> Tuple[List[List[int]], List[int]]:
-    """
-    Fallback: próbuje odczytać dane z page.get_text("text").
-    """
-    raw_text = page.get_text("text")
-    raw_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    draws_numbers: List[List[int]] = []
+    for i in range(0, len(all_tokens) - NUMBERS_IN_DRAW + 1, NUMBERS_IN_DRAW):
+        d = sorted(all_tokens[i:i + NUMBERS_IN_DRAW])
+        if len(set(d)) == NUMBERS_IN_DRAW and all(LOTTO_MIN <= x <= LOTTO_MAX for x in d):
+            draws_numbers.append(d)
 
-    numbers_rows = []
-    draw_ids = []
+    n = min(len(draws_numbers), len(all_drawnos))
+    records: List[Draw] = [Draw(draw_id=all_drawnos[i], numbers=draws_numbers[i]) for i in range(n)]
+    records.extend(Draw(draw_id=None, numbers=draws_numbers[j]) for j in range(n, len(draws_numbers)))
 
-    for line in raw_lines:
-        if is_footer_or_header_text(line):
-            continue
-
-        numeric_tokens = extract_int_tokens(line)
-        if not numeric_tokens:
-            continue
-
-        if len(numeric_tokens) == NUMBERS_IN_DRAW:
-            nums = [int(t) for t in numeric_tokens]
-            if all(LOTTO_MIN <= n <= LOTTO_MAX for n in nums) and len(set(nums)) == NUMBERS_IN_DRAW:
-                numbers_rows.append(sorted(nums))
-                continue
-
-        if len(numeric_tokens) == 1 and len(numeric_tokens[0]) == 4:
-            val = int(numeric_tokens[0])
-            if 6000 <= val <= 9999:
-                draw_ids.append(val)
-                continue
-
-    return numbers_rows, draw_ids
+    records.sort(key=lambda r: (r.draw_id is None, r.draw_id or -1), reverse=True)
+    return records
 
 
 def parse_lotto_pdf(pdf_source, max_draws: int = 999) -> Tuple[List[Draw], Dict]:
-    """
-    Odporny parser dla PDF Multipasko Lotto 6/49.
+    pdf_bytes = read_pdf_bytes(pdf_source)
 
-    Strategia:
-    1. Dla każdej strony próbujemy odczyt przez get_text("words").
-    2. Jeśli to nie da sensownego wyniku, próbujemy get_text("text").
-    3. Łączymy wiersze z 6 liczbami z 4-cyfrowymi ID losowań.
-    """
-    doc = open_pdf_document(pdf_source)
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        pages_total = len(doc)
 
-    parsed_draws: List[Draw] = []
-    diagnostics_pages = []
+    parsed_records = load_records_cached(pdf_bytes)
 
-    try:
-        for page_index in range(len(doc)):
-            page = doc[page_index]
+    if not parsed_records:
+        raise ValueError(
+            "Parser nie odczytał żadnych poprawnych losowań z PDF. "
+            "Upewnij się, że w repo jest właściwy plik wyniki.pdf."
+        )
 
-            numbers_rows_words, draw_ids_words = extract_page_candidates_from_words(page)
-            numbers_rows_text, draw_ids_text = extract_page_candidates_from_text(page)
+    draws_total_before_dedup = len(parsed_records)
 
-            pair_count_words = min(len(numbers_rows_words), len(draw_ids_words))
-            pair_count_text = min(len(numbers_rows_text), len(draw_ids_text))
+    dedup_with_id: Dict[int, Draw] = {}
+    without_id: List[Draw] = []
 
-            # Wybieramy lepszą metodę dla strony
-            if pair_count_words >= pair_count_text:
-                numbers_rows = numbers_rows_words
-                draw_ids = draw_ids_words
-                selected_method = "words"
-            else:
-                numbers_rows = numbers_rows_text
-                draw_ids = draw_ids_text
-                selected_method = "text"
+    for draw in parsed_records:
+        if draw.draw_id is None:
+            without_id.append(draw)
+        else:
+            if draw.draw_id not in dedup_with_id:
+                dedup_with_id[draw.draw_id] = draw
 
-            pair_count = min(len(numbers_rows), len(draw_ids))
+    draws = sorted(dedup_with_id.values(), key=lambda d: d.draw_id if d.draw_id is not None else -1, reverse=True)
 
-            page_draws = []
-            for i in range(pair_count):
-                draw = Draw(
-                    draw_id=draw_ids[i],
-                    numbers=numbers_rows[i]
-                )
-                page_draws.append(draw)
+    if without_id:
+        existing_sets = {tuple(d.numbers) for d in draws}
+        for d in without_id:
+            if tuple(d.numbers) not in existing_sets:
+                draws.append(d)
+                existing_sets.add(tuple(d.numbers))
 
-            parsed_draws.extend(page_draws)
+    if max_draws is not None:
+        draws = draws[:max_draws]
 
-            diagnostics_pages.append({
-                "page": page_index + 1,
-                "method": selected_method,
-                "numbers_rows_found_words": len(numbers_rows_words),
-                "draw_ids_found_words": len(draw_ids_words),
-                "paired_rows_words": pair_count_words,
-                "numbers_rows_found_text": len(numbers_rows_text),
-                "draw_ids_found_text": len(draw_ids_text),
-                "paired_rows_text": pair_count_text,
-                "paired_rows_selected": pair_count,
-                "sample_first_numbers_row": format_number_list(numbers_rows[0]) if numbers_rows else None,
-                "sample_first_draw_id": draw_ids[0] if draw_ids else None,
-            })
+    if not draws:
+        raise ValueError(
+            "Po deduplikacji nie pozostały żadne losowania do analizy."
+        )
 
-        # Deduplikacja po numerze losowania
-        dedup: Dict[int, Draw] = {}
-        for draw in parsed_draws:
-            if draw.draw_id not in dedup:
-                dedup[draw.draw_id] = draw
+    diagnostics = {
+        "pages_total": pages_total,
+        "draws_total_before_dedup": draws_total_before_dedup,
+        "draws_total_after_dedup": len(draws),
+        "newest_draw_id": next((d.draw_id for d in draws if d.draw_id is not None), None),
+        "oldest_draw_id": next((d.draw_id for d in reversed(draws) if d.draw_id is not None), None),
+        "pages": [
+            {
+                "page": "cały dokument",
+                "method": "text-token-parser",
+                "paired_rows_selected": len(draws),
+                "sample_first_numbers_row": format_number_list(draws[0].numbers) if draws else None,
+                "sample_first_draw_id": draws[0].draw_id if draws and draws[0].draw_id is not None else None,
+            }
+        ],
+    }
 
-        draws = sorted(dedup.values(), key=lambda d: d.draw_id, reverse=True)
-
-        if max_draws is not None:
-            draws = draws[:max_draws]
-
-        if not draws:
-            raise ValueError(
-                "Parser nie odczytał żadnych poprawnych losowań z PDF. "
-                "Upewnij się, że w repo jest właściwy plik wyniki.pdf i sprawdź zakładkę diagnostyki."
-            )
-
-        diagnostics = {
-            "pages_total": len(doc),
-            "draws_total_before_dedup": len(parsed_draws),
-            "draws_total_after_dedup": len(draws),
-            "newest_draw_id": draws[0].draw_id if draws else None,
-            "oldest_draw_id": draws[-1].draw_id if draws else None,
-            "pages": diagnostics_pages,
-        }
-
-        return draws, diagnostics
-
-    finally:
-        doc.close()
+    return draws, diagnostics
 
 
 # ============================================================
@@ -380,7 +292,7 @@ def parse_lotto_pdf(pdf_source, max_draws: int = 999) -> Tuple[List[Draw], Dict]
 
 class LottoAnalyzer:
     def __init__(self, draws: List[Draw], config: AnalyzerConfig):
-        self.draws = sorted(draws, key=lambda d: d.draw_id, reverse=True)
+        self.draws = self._sort_draws(draws)
         self.total_draws = len(self.draws)
         self.config = config
         self.random = random.Random(config.seed)
@@ -395,6 +307,13 @@ class LottoAnalyzer:
 
         self._analyze()
         self.intervals = self._analyze_intervals()
+
+    def _sort_draws(self, draws: List[Draw]) -> List[Draw]:
+        with_id = [d for d in draws if d.draw_id is not None]
+        without_id = [d for d in draws if d.draw_id is None]
+
+        with_id = sorted(with_id, key=lambda d: d.draw_id, reverse=True)
+        return with_id + without_id
 
     def _analyze(self):
         for draw in self.draws:
@@ -467,7 +386,7 @@ class LottoAnalyzer:
         rows = []
         for d in self.draws[:limit]:
             rows.append({
-                "ID losowania": d.draw_id,
+                "ID losowania": d.draw_id if d.draw_id is not None else "-",
                 "Liczby": format_number_list(d.numbers)
             })
         return rows
@@ -976,23 +895,16 @@ def render_file_input():
     return uploaded, use_local_file
 
 
-def resolve_pdf_source(uploaded_file, default_path: str):
-    if uploaded_file is not None:
-        return make_bytesio_from_upload(uploaded_file)
-
-    if os.path.exists(default_path):
-        return default_path
-
-    return None
-
-
 def render_overview(analyzer: LottoAnalyzer, diagnostics: Dict):
     st.subheader("📊 Podsumowanie analizy")
 
+    newest_with_id = next((d.draw_id for d in analyzer.draws if d.draw_id is not None), "-")
+    oldest_with_id = next((d.draw_id for d in reversed(analyzer.draws) if d.draw_id is not None), "-")
+
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Przeanalizowane losowania", analyzer.total_draws)
-    c2.metric("Najnowsze ID", analyzer.draws[0].draw_id if analyzer.draws else "-")
-    c3.metric("Najstarsze ID", analyzer.draws[-1].draw_id if analyzer.draws else "-")
+    c2.metric("Najnowsze ID", newest_with_id)
+    c3.metric("Najstarsze ID", oldest_with_id)
     c4.metric("Strony PDF", diagnostics.get("pages_total", "-"))
 
     st.markdown("### Ostatnie losowania")
@@ -1000,7 +912,7 @@ def render_overview(analyzer: LottoAnalyzer, diagnostics: Dict):
 
     st.markdown("### Informacja o parserze")
     st.success(
-        "Parser korzysta z dwóch metod odczytu PDF i automatycznie wybiera lepszą dla każdej strony."
+        "Parser korzysta z metody tekstowej opartej o page.get_text('text'), tak jak w sprawdzonym kodzie."
     )
 
 
@@ -1079,7 +991,7 @@ def render_diagnostics(diagnostics: Dict):
     col2.metric("Losowania po deduplikacji", diagnostics.get("draws_total_after_dedup", 0))
     col3.metric("Liczba stron", diagnostics.get("pages_total", 0))
 
-    st.markdown("### Szczegóły stron")
+    st.markdown("### Szczegóły parsera")
     st.dataframe(diagnostics.get("pages", []), use_container_width=True, height=520)
 
     with st.expander("Podgląd pełnej diagnostyki parsera"):
