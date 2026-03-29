@@ -519,10 +519,59 @@ class LottoAnalyzer:
 
         return score + pair_bonus + triple_bonus + rhythm_bonus + diversity_penalty
 
+    def _split_hot_cold_numbers(self, ranked_numbers: List[int]) -> Tuple[List[int], List[int]]:
+        """
+        Zwraca dwie pule:
+        - hot_numbers: liczby gorące
+        - cold_numbers: liczby zimne
+
+        Zasada:
+        - hot_pool == 49 -> wszystkie liczby traktowane jako gorące
+        - hot_pool == 0  -> wszystkie liczby traktowane jako zimne
+        - w innym przypadku:
+            hot = top N
+            cold = reszta rankingu
+        """
+        hp = self.config.hot_pool
+
+        if hp >= 49:
+            hot_numbers = ranked_numbers[:]
+            cold_numbers = []
+        elif hp <= 0:
+            hot_numbers = []
+            cold_numbers = list(reversed(ranked_numbers))
+        else:
+            hot_numbers = ranked_numbers[:hp]
+            cold_numbers = ranked_numbers[hp:]
+
+            if not cold_numbers:
+                cold_numbers = ranked_numbers[hp:]
+
+        return hot_numbers, cold_numbers
+
+    def _build_candidate_pool(self, ranked_numbers: List[int]) -> List[int]:
+        """
+        Główna pula do budowy kuponów:
+        - hot_pool == 49 -> tylko gorące
+        - hot_pool == 0  -> tylko zimne
+        - w innych przypadkach -> preferowane gorące
+        """
+        hot_numbers, cold_numbers = self._split_hot_cold_numbers(ranked_numbers)
+
+        if self.config.hot_pool >= 49:
+            return hot_numbers[:]
+
+        if self.config.hot_pool <= 0:
+            return cold_numbers[:]
+
+        return hot_numbers[:]
+
     def generate_smart_tickets(self, count: int = 6) -> List[Dict]:
         number_scores = self.compute_number_scores()
         ranked_numbers = [n for n, _ in sorted(number_scores.items(), key=lambda x: x[1], reverse=True)]
-        hot_pool = ranked_numbers[:self.config.hot_pool]
+
+        hot_numbers, cold_numbers = self._split_hot_cold_numbers(ranked_numbers)
+        candidate_pool = self._build_candidate_pool(ranked_numbers)
 
         top_quads = [q for q, c in self.quad_counter.most_common(12) if c > 1]
         top_triples = [t for t, c in self.triple_counter.most_common(30) if c > 1]
@@ -568,36 +617,82 @@ class LottoAnalyzer:
 
                 current = set(base_nums)
 
-                hot_candidates = hot_pool[:]
-                self.random.shuffle(hot_candidates)
+                # ====================================================
+                # TRYB 1: tylko gorące liczby (hot_pool == 49)
+                # ====================================================
+                if self.config.hot_pool >= 49:
+                    working_pool = candidate_pool[:]
+                    self.random.shuffle(working_pool)
 
-                for n in hot_candidates:
-                    if len(current) >= NUMBERS_IN_DRAW:
-                        break
-                    current.add(n)
-
-                if len(current) < NUMBERS_IN_DRAW:
-                    remaining = [n for n in range(LOTTO_MIN, LOTTO_MAX + 1) if n not in current]
-                    self.random.shuffle(remaining)
-                    for n in remaining:
+                    for n in working_pool:
                         if len(current) >= NUMBERS_IN_DRAW:
                             break
                         current.add(n)
 
-                nums = sorted(current)
+                    nums = sorted(current)
+
+                # ====================================================
+                # TRYB 2: tylko zimne liczby (hot_pool == 0)
+                # ====================================================
+                elif self.config.hot_pool <= 0:
+                    working_pool = candidate_pool[:]
+                    self.random.shuffle(working_pool)
+
+                    for n in working_pool:
+                        if len(current) >= NUMBERS_IN_DRAW:
+                            break
+                        current.add(n)
+
+                    nums = sorted(current)
+
+                # ====================================================
+                # TRYB 3: standardowy mieszany — najpierw gorące, potem ewentualnie reszta
+                # ====================================================
+                else:
+                    hot_candidates = hot_numbers[:]
+                    self.random.shuffle(hot_candidates)
+
+                    for n in hot_candidates:
+                        if len(current) >= NUMBERS_IN_DRAW:
+                            break
+                        current.add(n)
+
+                    if len(current) < NUMBERS_IN_DRAW:
+                        remaining = [n for n in ranked_numbers if n not in current]
+                        self.random.shuffle(remaining)
+                        for n in remaining:
+                            if len(current) >= NUMBERS_IN_DRAW:
+                                break
+                            current.add(n)
+
+                    nums = sorted(current)
 
                 repair_attempts = 0
                 while not self.validate_ticket(nums) and repair_attempts < 30:
                     repair_attempts += 1
                     current = set(base_nums)
 
-                    weighted_candidates = hot_pool[:]
-                    self.random.shuffle(weighted_candidates)
+                    if self.config.hot_pool >= 49:
+                        repair_pool = candidate_pool[:]
+                    elif self.config.hot_pool <= 0:
+                        repair_pool = candidate_pool[:]
+                    else:
+                        repair_pool = hot_numbers[:]
 
-                    for n in weighted_candidates:
+                    self.random.shuffle(repair_pool)
+
+                    for n in repair_pool:
                         if len(current) >= NUMBERS_IN_DRAW:
                             break
                         current.add(n)
+
+                    if len(current) < NUMBERS_IN_DRAW and self.config.hot_pool not in (0, 49):
+                        remaining = [n for n in ranked_numbers if n not in current]
+                        self.random.shuffle(remaining)
+                        for n in remaining:
+                            if len(current) >= NUMBERS_IN_DRAW:
+                                break
+                            current.add(n)
 
                     nums = sorted(current)
 
@@ -626,14 +721,35 @@ class LottoAnalyzer:
                     best_reason = reason
 
             if best_ticket is None:
+                fallback_pool = candidate_pool[:] if candidate_pool else ranked_numbers[:]
                 fallback = []
-                for n in ranked_numbers:
+
+                for n in fallback_pool:
                     if len(fallback) < NUMBERS_IN_DRAW:
                         fallback.append(n)
+
+                if len(fallback) < NUMBERS_IN_DRAW:
+                    for n in ranked_numbers:
+                        if n not in fallback and len(fallback) < NUMBERS_IN_DRAW:
+                            fallback.append(n)
+
                 best_ticket = sorted(fallback[:NUMBERS_IN_DRAW])
-                best_reason = "Awaryjny kupon z najwyżej punktowanych liczb"
+
+                if self.config.hot_pool >= 49:
+                    best_reason = "Awaryjny kupon wyłącznie z puli gorących liczb"
+                elif self.config.hot_pool <= 0:
+                    best_reason = "Awaryjny kupon wyłącznie z puli zimnych liczb"
+                else:
+                    best_reason = "Awaryjny kupon z najwyżej punktowanych liczb"
 
             seen_tickets.add(tuple(best_ticket))
+
+            if self.config.hot_pool >= 49:
+                geneza_prefix = "Tryb: tylko gorące liczby"
+            elif self.config.hot_pool <= 0:
+                geneza_prefix = "Tryb: tylko zimne liczby"
+            else:
+                geneza_prefix = f"Tryb: top {self.config.hot_pool} gorących"
 
             results.append({
                 "Kupon": ticket_index + 1,
@@ -641,16 +757,36 @@ class LottoAnalyzer:
                 "Suma": sum(best_ticket),
                 "Parzyste": count_even(best_ticket),
                 "Seria kolejnych": max_consecutive_run(best_ticket),
-                "Geneza": best_reason,
+                "Geneza": f"{geneza_prefix} | {best_reason}",
             })
 
         return results
 
     def get_number_analysis_table(self) -> List[Dict]:
         scores = self.compute_number_scores()
+        ranked_numbers = [n for n, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True)]
+
+        hot_set = set()
+        cold_set = set()
+
+        if self.config.hot_pool >= 49:
+            hot_set = set(ranked_numbers)
+        elif self.config.hot_pool <= 0:
+            cold_set = set(ranked_numbers)
+        else:
+            hot_set = set(ranked_numbers[:self.config.hot_pool])
+            cold_set = set(ranked_numbers[self.config.hot_pool:])
+
         rows = []
 
         for n in range(LOTTO_MIN, LOTTO_MAX + 1):
+            if n in hot_set:
+                temp_class = "🔥 GORĄCA"
+            elif n in cold_set:
+                temp_class = "🧊 ZIMNA"
+            else:
+                temp_class = "-"
+
             rows.append({
                 "Liczba": format_num(n),
                 "Trafienia": self.number_counter[n],
@@ -661,6 +797,7 @@ class LottoAnalyzer:
                 "Wsp. spóźnienia": round(self.intervals[n]["overdue_factor"], 2),
                 "Wynik AI": round(scores[n], 4),
                 "W rytmie": "✅ TAK" if self.intervals[n]["most_common_gap"] > 0 and self.intervals[n]["current_gap"] == self.intervals[n]["most_common_gap"] else "❌ NIE",
+                "Klasa": temp_class,
             })
 
         rows.sort(key=lambda x: x["Wynik AI"], reverse=True)
@@ -832,10 +969,11 @@ def render_sidebar() -> Tuple[int, int, AnalyzerConfig]:
     st.sidebar.subheader("Silnik generatora")
     hot_pool = st.sidebar.slider(
         "Rozmiar puli najmocniejszych liczb",
-        min_value=12,
-        max_value=35,
+        min_value=0,
+        max_value=49,
         value=DEFAULT_HOT_POOL,
-        step=1
+        step=1,
+        help="0 = tylko zimne liczby, 49 = tylko gorące liczby, wartości pośrednie = top N gorących."
     )
 
     generation_attempts = st.sidebar.slider(
@@ -853,6 +991,13 @@ def render_sidebar() -> Tuple[int, int, AnalyzerConfig]:
         value=DEFAULT_RANDOM_SEED,
         step=1
     )
+
+    if hot_pool == 49:
+        st.sidebar.success("Tryb aktywny: losowanie tylko z gorących liczb.")
+    elif hot_pool == 0:
+        st.sidebar.warning("Tryb aktywny: losowanie tylko z zimnych liczb.")
+    else:
+        st.sidebar.info(f"Tryb aktywny: top {hot_pool} gorących liczb.")
 
     config = AnalyzerConfig(
         weight_freq=DEFAULT_WEIGHT_FREQ,
@@ -928,7 +1073,8 @@ def render_generated_tickets(analyzer: LottoAnalyzer, tickets_count: int):
                 <br>• sprawdza rytmikę liczb,
                 <br>• buduje rdzeń kuponu na podstawie historii,
                 <br>• dopełnia go najsilniejszymi liczbami,
-                <br>• odrzuca układy skrajne.
+                <br>• odrzuca układy skrajne,
+                <br>• może działać w trybie wyłącznie gorących albo wyłącznie zimnych liczb.
             </div>
         </div>
         """,
