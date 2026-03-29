@@ -46,18 +46,12 @@ DEFAULT_GENERATION_ATTEMPTS = 7000
 
 @dataclass
 class Draw:
-    """
-    Reprezentuje jedno losowanie Lotto.
-    """
     draw_id: int
     numbers: List[int]
 
 
 @dataclass
 class AnalyzerConfig:
-    """
-    Zbiór ustawień sterujących analizą i generowaniem kuponów.
-    """
     weight_freq: float
     weight_recency: float
     weight_rhythm: float
@@ -78,39 +72,24 @@ class AnalyzerConfig:
 # ============================================================
 
 def safe_percent(part: int, whole: int) -> float:
-    """
-    Zwraca procent z zabezpieczeniem przed dzieleniem przez zero.
-    """
     if whole == 0:
         return 0.0
     return (part / whole) * 100.0
 
 
 def format_num(n: int) -> str:
-    """
-    Zamienia liczbę na zapis dwucyfrowy.
-    """
     return f"{n:02d}"
 
 
 def format_number_list(nums: List[int]) -> str:
-    """
-    Formatuje listę liczb do czytelnego zapisu.
-    """
     return " ".join(format_num(n) for n in sorted(nums))
 
 
 def count_even(nums: List[int]) -> int:
-    """
-    Zlicza liczby parzyste.
-    """
     return sum(1 for n in nums if n % 2 == 0)
 
 
 def max_consecutive_run(nums: List[int]) -> int:
-    """
-    Zwraca długość najdłuższej serii kolejnych liczb.
-    """
     if not nums:
         return 0
 
@@ -129,9 +108,6 @@ def max_consecutive_run(nums: List[int]) -> int:
 
 
 def calculate_zscores(values_dict: Dict[int, float]) -> Dict[int, float]:
-    """
-    Zamienia słownik wartości na z-score.
-    """
     if not values_dict:
         return {}
 
@@ -147,21 +123,12 @@ def calculate_zscores(values_dict: Dict[int, float]) -> Dict[int, float]:
 
 
 def make_bytesio_from_upload(uploaded_file) -> io.BytesIO:
-    """
-    Zamienia plik wgrany przez użytkownika do pamięci BytesIO.
-    """
     if uploaded_file is None:
         raise ValueError("Nie przesłano pliku PDF.")
     return io.BytesIO(uploaded_file.read())
 
 
 def open_pdf_document(pdf_source):
-    """
-    Otwiera dokument PDF z:
-    - ścieżki pliku,
-    - bytes,
-    - BytesIO.
-    """
     if isinstance(pdf_source, str):
         if not os.path.exists(pdf_source):
             raise FileNotFoundError(f"Nie znaleziono pliku: {pdf_source}")
@@ -177,23 +144,152 @@ def open_pdf_document(pdf_source):
 
 
 # ============================================================
-# PARSER PDF DLA PLIKU LOTTO Z MULTIPASKO
+# PARSER PDF
 # ============================================================
+
+def clean_token(token: str) -> str:
+    return token.strip()
+
+
+def is_footer_or_header_text(text: str) -> bool:
+    low = text.lower().strip()
+    if not low:
+        return True
+
+    bad_parts = [
+        "www.multipasko.pl",
+        "multipasko.pl",
+        "©",
+        "lotto 6/49",
+        "lotto",
+    ]
+    return any(part in low for part in bad_parts)
+
+
+def extract_int_tokens(text: str) -> List[str]:
+    return re.findall(r"\b\d+\b", text)
+
+
+def group_words_into_lines(words, y_threshold: float = 8.0) -> List[List[str]]:
+    """
+    Grupuje słowa zwrócone przez page.get_text("words") do linii
+    na podstawie współrzędnej Y.
+    """
+    prepared = []
+
+    for w in words:
+        x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], str(w[4]).strip()
+        if not text:
+            continue
+        if is_footer_or_header_text(text):
+            continue
+
+        mid_y = (y0 + y1) / 2.0
+        prepared.append((mid_y, x0, text))
+
+    prepared.sort(key=lambda item: (round(item[0], 1), item[1]))
+
+    lines = []
+    current_line = []
+    current_y = None
+
+    for mid_y, x0, text in prepared:
+        if current_y is None:
+            current_line = [(x0, text)]
+            current_y = mid_y
+            continue
+
+        if abs(mid_y - current_y) <= y_threshold:
+            current_line.append((x0, text))
+            current_y = (current_y + mid_y) / 2.0
+        else:
+            current_line.sort(key=lambda item: item[0])
+            lines.append([txt for _, txt in current_line])
+            current_line = [(x0, text)]
+            current_y = mid_y
+
+    if current_line:
+        current_line.sort(key=lambda item: item[0])
+        lines.append([txt for _, txt in current_line])
+
+    return lines
+
+
+def extract_page_candidates_from_words(page) -> Tuple[List[List[int]], List[int]]:
+    """
+    Próbuje odczytać wiersze liczb i ID losowań metodą opartą o współrzędne słów.
+    """
+    words = page.get_text("words")
+    lines = group_words_into_lines(words, y_threshold=8.0)
+
+    numbers_rows = []
+    draw_ids = []
+
+    for line_tokens in lines:
+        joined = " ".join(line_tokens)
+        numeric_tokens = extract_int_tokens(joined)
+
+        if not numeric_tokens:
+            continue
+
+        # Dokładnie 6 liczb z zakresu 1..49
+        if len(numeric_tokens) == NUMBERS_IN_DRAW:
+            nums = [int(t) for t in numeric_tokens]
+            if all(LOTTO_MIN <= n <= LOTTO_MAX for n in nums) and len(set(nums)) == NUMBERS_IN_DRAW:
+                numbers_rows.append(sorted(nums))
+                continue
+
+        # Pojedynczy 4-cyfrowy numer losowania
+        if len(numeric_tokens) == 1 and len(numeric_tokens[0]) == 4:
+            val = int(numeric_tokens[0])
+            if 6000 <= val <= 9999:
+                draw_ids.append(val)
+                continue
+
+    return numbers_rows, draw_ids
+
+
+def extract_page_candidates_from_text(page) -> Tuple[List[List[int]], List[int]]:
+    """
+    Fallback: próbuje odczytać dane z page.get_text("text").
+    """
+    raw_text = page.get_text("text")
+    raw_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+
+    numbers_rows = []
+    draw_ids = []
+
+    for line in raw_lines:
+        if is_footer_or_header_text(line):
+            continue
+
+        numeric_tokens = extract_int_tokens(line)
+        if not numeric_tokens:
+            continue
+
+        if len(numeric_tokens) == NUMBERS_IN_DRAW:
+            nums = [int(t) for t in numeric_tokens]
+            if all(LOTTO_MIN <= n <= LOTTO_MAX for n in nums) and len(set(nums)) == NUMBERS_IN_DRAW:
+                numbers_rows.append(sorted(nums))
+                continue
+
+        if len(numeric_tokens) == 1 and len(numeric_tokens[0]) == 4:
+            val = int(numeric_tokens[0])
+            if 6000 <= val <= 9999:
+                draw_ids.append(val)
+                continue
+
+    return numbers_rows, draw_ids
+
 
 def parse_lotto_pdf(pdf_source, max_draws: int = 999) -> Tuple[List[Draw], Dict]:
     """
     Odporny parser dla PDF Multipasko Lotto 6/49.
 
-    Działa na współrzędnych słów (get_text("words")), dzięki czemu jest
-    znacznie stabilniejszy na Streamlit Cloud niż parser oparty o get_text("text").
-
-    Założenia dla tego formatu:
-    1. Na każdej stronie występują wiersze z 6 liczbami Lotto.
-    2. Poniżej / obok występują osobne 4-cyfrowe numery losowań.
-    3. Kolejność od góry odpowiada 1:1:
-       pierwszy wiersz liczb -> pierwsze ID,
-       drugi wiersz liczb -> drugie ID itd.
-    4. Stopki typu "www.multipasko.pl © 2004 - 2026" mają być ignorowane.
+    Strategia:
+    1. Dla każdej strony próbujemy odczyt przez get_text("words").
+    2. Jeśli to nie da sensownego wyniku, próbujemy get_text("text").
+    3. Łączymy wiersze z 6 liczbami z 4-cyfrowymi ID losowań.
     """
     doc = open_pdf_document(pdf_source)
 
@@ -204,108 +300,49 @@ def parse_lotto_pdf(pdf_source, max_draws: int = 999) -> Tuple[List[Draw], Dict]
         for page_index in range(len(doc)):
             page = doc[page_index]
 
-            words = page.get_text("words")
-            # format elementu:
-            # (x0, y0, x1, y1, text, block_no, line_no, word_no)
+            numbers_rows_words, draw_ids_words = extract_page_candidates_from_words(page)
+            numbers_rows_text, draw_ids_text = extract_page_candidates_from_text(page)
 
-            words_with_coords = []
-            for w in words:
-                x0, y0, x1, y1, text = w[0], w[1], w[2], w[3], w[4]
-                text = str(text).strip()
-                if not text:
-                    continue
+            pair_count_words = min(len(numbers_rows_words), len(draw_ids_words))
+            pair_count_text = min(len(numbers_rows_text), len(draw_ids_text))
 
-                low = text.lower()
-
-                # Odrzucanie znanych śmieci / stopek / nagłówków
-                if "multipasko" in low or "www." in low or "©" in text:
-                    continue
-                if low == "lotto" or "6/49" in low:
-                    continue
-
-                mid_y = (y0 + y1) / 2.0
-                words_with_coords.append((mid_y, x0, text))
-
-            # Sortowanie po Y, potem po X
-            words_with_coords.sort(key=lambda item: (round(item[0], 1), item[1]))
-
-            # Grupowanie w linie po pozycji Y
-            lines: List[List[str]] = []
-            current_line: List[Tuple[float, str]] = []
-            current_y: Optional[float] = None
-            y_threshold = 8.0
-
-            for mid_y, x0, text in words_with_coords:
-                if current_y is None:
-                    current_line = [(x0, text)]
-                    current_y = mid_y
-                    continue
-
-                if abs(mid_y - current_y) <= y_threshold:
-                    current_line.append((x0, text))
-                    current_y = (current_y + mid_y) / 2.0
-                else:
-                    current_line.sort(key=lambda item: item[0])
-                    lines.append([txt for _, txt in current_line])
-
-                    current_line = [(x0, text)]
-                    current_y = mid_y
-
-            if current_line:
-                current_line.sort(key=lambda item: item[0])
-                lines.append([txt for _, txt in current_line])
-
-            numbers_rows: List[List[int]] = []
-            draw_ids: List[int] = []
-
-            for line_tokens in lines:
-                numeric_tokens: List[str] = []
-                for token in line_tokens:
-                    numeric_tokens.extend(re.findall(r"\b\d+\b", token))
-
-                if not numeric_tokens:
-                    continue
-
-                # Przypadek: pełny wiersz 6 liczb Lotto
-                if len(numeric_tokens) == NUMBERS_IN_DRAW:
-                    nums = [int(t) for t in numeric_tokens]
-                    if all(LOTTO_MIN <= n <= LOTTO_MAX for n in nums) and len(set(nums)) == NUMBERS_IN_DRAW:
-                        numbers_rows.append(sorted(nums))
-                        continue
-
-                # Przypadek: osobny numer losowania
-                if len(numeric_tokens) == 1:
-                    tok = numeric_tokens[0]
-                    if len(tok) == 4:
-                        val = int(tok)
-                        # zakres dla ID losowań z pliku, odrzuca np. 2004 i 2026 ze stopki
-                        if 6000 <= val <= 9999:
-                            draw_ids.append(val)
-                            continue
+            # Wybieramy lepszą metodę dla strony
+            if pair_count_words >= pair_count_text:
+                numbers_rows = numbers_rows_words
+                draw_ids = draw_ids_words
+                selected_method = "words"
+            else:
+                numbers_rows = numbers_rows_text
+                draw_ids = draw_ids_text
+                selected_method = "text"
 
             pair_count = min(len(numbers_rows), len(draw_ids))
 
             page_draws = []
             for i in range(pair_count):
-                page_draws.append(
-                    Draw(
-                        draw_id=draw_ids[i],
-                        numbers=numbers_rows[i]
-                    )
+                draw = Draw(
+                    draw_id=draw_ids[i],
+                    numbers=numbers_rows[i]
                 )
+                page_draws.append(draw)
 
             parsed_draws.extend(page_draws)
 
             diagnostics_pages.append({
                 "page": page_index + 1,
-                "numbers_rows_found": len(numbers_rows),
-                "draw_ids_found": len(draw_ids),
-                "paired_rows": pair_count,
+                "method": selected_method,
+                "numbers_rows_found_words": len(numbers_rows_words),
+                "draw_ids_found_words": len(draw_ids_words),
+                "paired_rows_words": pair_count_words,
+                "numbers_rows_found_text": len(numbers_rows_text),
+                "draw_ids_found_text": len(draw_ids_text),
+                "paired_rows_text": pair_count_text,
+                "paired_rows_selected": pair_count,
                 "sample_first_numbers_row": format_number_list(numbers_rows[0]) if numbers_rows else None,
                 "sample_first_draw_id": draw_ids[0] if draw_ids else None,
             })
 
-        # Usuwanie duplikatów po numerze losowania
+        # Deduplikacja po numerze losowania
         dedup: Dict[int, Draw] = {}
         for draw in parsed_draws:
             if draw.draw_id not in dedup:
@@ -313,14 +350,13 @@ def parse_lotto_pdf(pdf_source, max_draws: int = 999) -> Tuple[List[Draw], Dict]
 
         draws = sorted(dedup.values(), key=lambda d: d.draw_id, reverse=True)
 
-        # Ograniczenie liczby losowań dopiero po pełnym odczycie
         if max_draws is not None:
             draws = draws[:max_draws]
 
         if not draws:
             raise ValueError(
                 "Parser nie odczytał żadnych poprawnych losowań z PDF. "
-                "Sprawdź diagnostykę stron albo układ pliku wejściowego."
+                "Upewnij się, że w repo jest właściwy plik wyniki.pdf i sprawdź zakładkę diagnostyki."
             )
 
         diagnostics = {
@@ -343,14 +379,6 @@ def parse_lotto_pdf(pdf_source, max_draws: int = 999) -> Tuple[List[Draw], Dict]
 # ============================================================
 
 class LottoAnalyzer:
-    """
-    Główna klasa odpowiedzialna za:
-    - analizę częstotliwości,
-    - analizę odstępów / rytmów,
-    - analizę par i trójek,
-    - tworzenie inteligentnych kuponów.
-    """
-
     def __init__(self, draws: List[Draw], config: AnalyzerConfig):
         self.draws = sorted(draws, key=lambda d: d.draw_id, reverse=True)
         self.total_draws = len(self.draws)
@@ -369,9 +397,6 @@ class LottoAnalyzer:
         self.intervals = self._analyze_intervals()
 
     def _analyze(self):
-        """
-        Buduje główne statystyki na podstawie historii losowań.
-        """
         for draw in self.draws:
             nums = sorted(draw.numbers)
 
@@ -390,9 +415,6 @@ class LottoAnalyzer:
                 self.quad_counter[quad] += 1
 
     def _analyze_intervals(self) -> Dict[int, Dict]:
-        """
-        Analizuje odstępy pomiędzy wystąpieniami każdej liczby.
-        """
         chronological = list(reversed(self.draws))
         intervals_data = {
             n: {
@@ -439,15 +461,9 @@ class LottoAnalyzer:
         return intervals_data
 
     def get_last_draw(self) -> Optional[Draw]:
-        """
-        Zwraca najnowsze losowanie.
-        """
         return self.draws[0] if self.draws else None
 
     def get_recent_draws_table(self, limit: int = 15) -> List[Dict]:
-        """
-        Zwraca tabelę ostatnich losowań do wyświetlenia.
-        """
         rows = []
         for d in self.draws[:limit]:
             rows.append({
@@ -457,9 +473,6 @@ class LottoAnalyzer:
         return rows
 
     def compute_number_scores(self) -> Dict[int, float]:
-        """
-        Wylicza łączny wynik punktowy każdej liczby.
-        """
         freq_dict = {n: self.number_counter[n] for n in range(LOTTO_MIN, LOTTO_MAX + 1)}
 
         recency_points = {n: 0.0 for n in range(LOTTO_MIN, LOTTO_MAX + 1)}
@@ -525,9 +538,6 @@ class LottoAnalyzer:
         return scores
 
     def validate_ticket(self, nums: List[int]) -> bool:
-        """
-        Waliduje kupon Lotto według rozsądnych zasad estetyczno-statystycznych.
-        """
         nums = sorted(nums)
 
         if len(nums) != NUMBERS_IN_DRAW:
@@ -563,9 +573,6 @@ class LottoAnalyzer:
         return True
 
     def ticket_quality_score(self, nums: List[int], ranked_scores: Dict[int, float]) -> float:
-        """
-        Ocenia jakość całego kuponu.
-        """
         nums = sorted(nums)
         score = sum(ranked_scores.get(n, 0.0) for n in nums)
 
@@ -594,9 +601,6 @@ class LottoAnalyzer:
         return score + pair_bonus + triple_bonus + rhythm_bonus + diversity_penalty
 
     def generate_smart_tickets(self, count: int = 6) -> List[Dict]:
-        """
-        Generuje inteligentne kupony Lotto.
-        """
         number_scores = self.compute_number_scores()
         ranked_numbers = [n for n, _ in sorted(number_scores.items(), key=lambda x: x[1], reverse=True)]
         hot_pool = ranked_numbers[:self.config.hot_pool]
@@ -724,9 +728,6 @@ class LottoAnalyzer:
         return results
 
     def get_number_analysis_table(self) -> List[Dict]:
-        """
-        Zwraca tabelę analizy każdej liczby 1..49.
-        """
         scores = self.compute_number_scores()
         rows = []
 
@@ -747,9 +748,6 @@ class LottoAnalyzer:
         return rows
 
     def get_top_patterns_table(self) -> Dict[str, List[Dict]]:
-        """
-        Zwraca najczęstsze pary, trójki i czwórki.
-        """
         pairs = []
         for pair, cnt in self.pair_counter.most_common(20):
             pairs.append({
@@ -783,9 +781,6 @@ class LottoAnalyzer:
 # ============================================================
 
 def inject_custom_css():
-    """
-    Dodaje własny styl CSS.
-    """
     st.markdown(
         """
         <style>
@@ -855,9 +850,6 @@ def inject_custom_css():
 
 
 def render_header():
-    """
-    Renderuje nagłówek aplikacji.
-    """
     st.title(APP_TITLE)
     st.caption(APP_SUBTITLE)
 
@@ -878,9 +870,6 @@ def render_header():
 
 
 def render_sidebar() -> Tuple[int, int, AnalyzerConfig]:
-    """
-    Renderuje panel boczny z ustawieniami użytkownika.
-    """
     st.sidebar.header("⚙️ Ustawienia")
 
     max_draws = st.sidebar.number_input(
@@ -889,7 +878,7 @@ def render_sidebar() -> Tuple[int, int, AnalyzerConfig]:
         max_value=5000,
         value=MAX_DRAWS_DEFAULT,
         step=1,
-        help="Im więcej losowań, tym szersza historia. Dla tego pliku zwykle będzie to maksymalnie tyle, ile odczyta parser."
+        help="Im więcej losowań, tym szersza historia."
     )
 
     tickets_count = st.sidebar.number_input(
@@ -903,20 +892,17 @@ def render_sidebar() -> Tuple[int, int, AnalyzerConfig]:
     st.sidebar.subheader("Zasady kuponu")
     rule_even_odd = st.sidebar.checkbox(
         "Wymuś balans parzyste/nieparzyste",
-        value=True,
-        help="Dopuszcza układ 2/4, 3/3 albo 4/2."
+        value=True
     )
 
     rule_spread = st.sidebar.checkbox(
         "Wymuś rozsądny rozstrzał liczb",
-        value=True,
-        help="Pilnuje, aby różnica między najmniejszą a największą liczbą nie była zbyt mała."
+        value=True
     )
 
     rule_sum_range = st.sidebar.checkbox(
         "Wymuś rozsądny zakres sumy",
-        value=True,
-        help="Odrzuca bardzo skrajne kupony o nienaturalnie niskiej lub wysokiej sumie."
+        value=True
     )
 
     rule_avoid_last_draw_clone = st.sidebar.checkbox(
@@ -938,8 +924,7 @@ def render_sidebar() -> Tuple[int, int, AnalyzerConfig]:
         min_value=500,
         max_value=12000,
         value=DEFAULT_GENERATION_ATTEMPTS,
-        step=500,
-        help="Więcej prób = lepsza selekcja, ale dłuższe liczenie."
+        step=500
     )
 
     seed = st.sidebar.number_input(
@@ -970,15 +955,11 @@ def render_sidebar() -> Tuple[int, int, AnalyzerConfig]:
 
 
 def render_file_input():
-    """
-    Renderuje sekcję wyboru pliku PDF.
-    """
     st.subheader("📄 Plik wejściowy PDF")
 
     uploaded = st.file_uploader(
         "Wgraj plik wyniki.pdf z historią Lotto",
-        type=["pdf"],
-        help="Aplikacja jest przygotowana pod plik PDF w układzie podobnym do Multipasko Lotto 6/49."
+        type=["pdf"]
     )
 
     use_local_file = st.checkbox(
@@ -988,7 +969,7 @@ def render_file_input():
 
     col1, col2 = st.columns(2)
     with col1:
-        st.info("Format docelowy: Lotto 6/49, 6 liczb w wierszu, numery losowań w tabeli.")
+        st.info("Format docelowy: Lotto 6/49, 6 liczb w wierszu, osobne 4-cyfrowe ID losowań.")
     with col2:
         st.info("Parser ignoruje stopki typu „www.multipasko.pl © 2004 - 2026”.")
 
@@ -996,9 +977,6 @@ def render_file_input():
 
 
 def resolve_pdf_source(uploaded_file, default_path: str):
-    """
-    Wybiera źródło PDF.
-    """
     if uploaded_file is not None:
         return make_bytesio_from_upload(uploaded_file)
 
@@ -1009,9 +987,6 @@ def resolve_pdf_source(uploaded_file, default_path: str):
 
 
 def render_overview(analyzer: LottoAnalyzer, diagnostics: Dict):
-    """
-    Zakładka przeglądowa z najważniejszymi informacjami.
-    """
     st.subheader("📊 Podsumowanie analizy")
 
     c1, c2, c3, c4 = st.columns(4)
@@ -1025,27 +1000,23 @@ def render_overview(analyzer: LottoAnalyzer, diagnostics: Dict):
 
     st.markdown("### Informacja o parserze")
     st.success(
-        "Parser działa bez OCR i czyta PDF po współrzędnych słów, dzięki czemu jest stabilniejszy "
-        "na Streamlit Cloud dla tabel z układem podobnym do Multipasko."
+        "Parser korzysta z dwóch metod odczytu PDF i automatycznie wybiera lepszą dla każdej strony."
     )
 
 
 def render_generated_tickets(analyzer: LottoAnalyzer, tickets_count: int):
-    """
-    Zakładka z wygenerowanymi kuponami.
-    """
     st.subheader("🎟️ Inteligentne kupony Lotto 6/49")
 
     st.markdown(
         """
         <div class="app-card">
             <div class="small-note">
-                Generator działa w kilku krokach:
-                <br>• szuka par, trójek i czwórek, które historycznie lubiły wypadać razem,
-                <br>• sprawdza częstotliwość i rytmikę każdej liczby,
-                <br>• buduje rdzeń kuponu z układów historycznych,
-                <br>• dopełnia kupon najmocniejszymi liczbami,
-                <br>• odrzuca zestawy zbyt skrajne lub mało sensowne.
+                Generator:
+                <br>• szuka częstych par, trójek i czwórek,
+                <br>• sprawdza rytmikę liczb,
+                <br>• buduje rdzeń kuponu na podstawie historii,
+                <br>• dopełnia go najsilniejszymi liczbami,
+                <br>• odrzuca układy skrajne.
             </div>
         </div>
         """,
@@ -1074,31 +1045,13 @@ def render_generated_tickets(analyzer: LottoAnalyzer, tickets_count: int):
 
 
 def render_numbers_analysis(analyzer: LottoAnalyzer):
-    """
-    Zakładka z pełną analizą liczb 1..49.
-    """
     st.subheader("🔢 Analiza liczb 1–49")
-
-    st.markdown(
-        """
-        <div class="app-card">
-            <div class="small-note">
-                <b>Wynik AI</b> to łączna ocena liczby oparta na:
-                częstotliwości, świeżości w nowszych losowaniach, parach, trójkach, rytmice i lekkim bonusie za spóźnienie.
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
 
     table = analyzer.get_number_analysis_table()
     st.dataframe(table, use_container_width=True, height=650)
 
 
 def render_patterns(analyzer: LottoAnalyzer):
-    """
-    Zakładka z najczęstszymi układami historycznymi.
-    """
     st.subheader("🧩 Najczęstsze układy historyczne")
 
     patterns = analyzer.get_top_patterns_table()
@@ -1119,12 +1072,7 @@ def render_patterns(analyzer: LottoAnalyzer):
 
 
 def render_diagnostics(diagnostics: Dict):
-    """
-    Zakładka diagnostyczna pokazująca jak parser odczytał plik.
-    """
     st.subheader("🛠️ Diagnostyka parsowania PDF")
-
-    st.write("Ta sekcja pozwala sprawdzić, czy plik został odczytany poprawnie.")
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Losowania przed deduplikacją", diagnostics.get("draws_total_before_dedup", 0))
@@ -1132,20 +1080,17 @@ def render_diagnostics(diagnostics: Dict):
     col3.metric("Liczba stron", diagnostics.get("pages_total", 0))
 
     st.markdown("### Szczegóły stron")
-    st.dataframe(diagnostics.get("pages", []), use_container_width=True, height=500)
+    st.dataframe(diagnostics.get("pages", []), use_container_width=True, height=520)
 
     with st.expander("Podgląd pełnej diagnostyki parsera"):
         st.json(diagnostics)
 
 
 # ============================================================
-# GŁÓWNA FUNKCJA APLIKACJI
+# GŁÓWNA FUNKCJA
 # ============================================================
 
 def main():
-    """
-    Główna funkcja uruchamiająca aplikację Streamlit.
-    """
     st.set_page_config(
         page_title=APP_TITLE,
         layout="wide",
