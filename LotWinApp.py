@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any
 
 import fitz  # PyMuPDF
+import pandas as pd
 import streamlit as st
 
 
@@ -572,10 +573,6 @@ class LottoAnalyzer:
         return hot_numbers[:]
 
     def _build_bystrzacha_position_options(self) -> List[List[Tuple[int, float, int]]]:
-        """
-        Dla każdej pozycji zwraca listę kandydatów:
-        (predicted_value, score, delta)
-        """
         last_draw = self.get_last_draw()
         if not last_draw:
             return []
@@ -593,14 +590,11 @@ class LottoAnalyzer:
             for rank_index, (delta, freq) in enumerate(top_deltas):
                 predicted = base_value + delta
                 if LOTTO_MIN <= predicted <= LOTTO_MAX:
-                    # lekka premia za wyższą częstość i za lepszą pozycję w rankingu
                     score = float(freq) - (rank_index * 0.05)
                     position_options.append((predicted, score, delta))
 
-            # fallback: bez zmiany pozycji
             position_options.append((base_value, 0.01, 0))
 
-            # deduplikacja predicted value — zostaw najwyższy score
             best_map: Dict[int, Tuple[int, float, int]] = {}
             for predicted, score, delta in position_options:
                 if predicted not in best_map or score > best_map[predicted][1]:
@@ -615,13 +609,6 @@ class LottoAnalyzer:
         self,
         options_per_position: List[List[Tuple[int, float, int]]]
     ) -> Tuple[List[int], List[int], float]:
-        """
-        Szuka najlepszego rosnącego i unikalnego układu 6 liczb.
-        Zwraca:
-        - liczby
-        - użyte delty
-        - score
-        """
         best_numbers: Optional[List[int]] = None
         best_deltas: Optional[List[int]] = None
         best_score = float("-inf")
@@ -660,7 +647,6 @@ class LottoAnalyzer:
         if best_numbers is not None and best_deltas is not None:
             return best_numbers, best_deltas, best_score
 
-        # fallback greedy
         greedy_nums = []
         greedy_deltas = []
         for pos in range(NUMBERS_IN_DRAW):
@@ -787,17 +773,18 @@ class LottoAnalyzer:
 
         if self.config.enable_bystrzacha:
             bystrzacha_ticket = self.generate_bystrzacha_ticket()
-            bt_numbers = [int(x) for x in bystrzacha_ticket["Liczby Lotto 6/49"].split()] if bystrzacha_ticket["Liczby Lotto 6/49"] != "-" else []
-            if len(bt_numbers) == NUMBERS_IN_DRAW:
-                seen_tickets.add(tuple(bt_numbers))
-                results.append({
-                    "Kupon": "B",
-                    "Liczby Lotto 6/49": bystrzacha_ticket["Liczby Lotto 6/49"],
-                    "Suma": bystrzacha_ticket["Suma"],
-                    "Parzyste": bystrzacha_ticket["Parzyste"],
-                    "Seria kolejnych": bystrzacha_ticket["Seria kolejnych"],
-                    "Geneza": f"🧠 {bystrzacha_ticket['Geneza']}",
-                })
+            if bystrzacha_ticket["Liczby Lotto 6/49"] != "-":
+                bt_numbers = [int(x) for x in bystrzacha_ticket["Liczby Lotto 6/49"].split()]
+                if len(bt_numbers) == NUMBERS_IN_DRAW:
+                    seen_tickets.add(tuple(bt_numbers))
+                    results.append({
+                        "Kupon": "B",
+                        "Liczby Lotto 6/49": bystrzacha_ticket["Liczby Lotto 6/49"],
+                        "Suma": bystrzacha_ticket["Suma"],
+                        "Parzyste": bystrzacha_ticket["Parzyste"],
+                        "Seria kolejnych": bystrzacha_ticket["Seria kolejnych"],
+                        "Geneza": f"🧠 {bystrzacha_ticket['Geneza']}",
+                    })
 
         normal_count = count
         if self.config.enable_bystrzacha and len(results) > 0:
@@ -958,13 +945,16 @@ class LottoAnalyzer:
                 geneza_prefix = f"Tryb: top {self.config.hot_pool} gorących"
 
             results.append({
-                "Kupon": len(results) + 1 if not self.config.enable_bystrzacha else len(results),
+                "Kupon": str(len(results)),
                 "Liczby Lotto 6/49": format_number_list(best_ticket),
                 "Suma": sum(best_ticket),
                 "Parzyste": count_even(best_ticket),
                 "Seria kolejnych": max_consecutive_run(best_ticket),
                 "Geneza": f"{geneza_prefix} | {best_reason}",
             })
+
+        for row in results:
+            row["Kupon"] = str(row["Kupon"])
 
         return results[:count]
 
@@ -1283,7 +1273,8 @@ def render_overview(analyzer: LottoAnalyzer, diagnostics: Dict):
     c4.metric("Strony PDF", diagnostics.get("pages_total", "-"))
 
     st.markdown("### Ostatnie losowania")
-    st.dataframe(analyzer.get_recent_draws_table(15), use_container_width=True, height=420)
+    recent_df = pd.DataFrame(analyzer.get_recent_draws_table(15))
+    st.dataframe(recent_df, width="stretch", height=420)
 
     st.markdown("### Informacja o parserze")
     st.success(
@@ -1313,7 +1304,12 @@ def render_generated_tickets(analyzer: LottoAnalyzer, tickets_count: int):
     )
 
     tickets = analyzer.generate_smart_tickets(tickets_count)
-    st.dataframe(tickets, use_container_width=True, height=420)
+    tickets_df = pd.DataFrame(tickets)
+
+    if "Kupon" in tickets_df.columns:
+        tickets_df["Kupon"] = tickets_df["Kupon"].astype(str)
+
+    st.dataframe(tickets_df, width="stretch", height=420)
 
     txt_content = "=== TWOJE KUPONY LOTTO PRO ===\n\n"
     for row in tickets:
@@ -1337,7 +1333,8 @@ def render_numbers_analysis(analyzer: LottoAnalyzer):
     st.subheader("🔢 Analiza liczb 1–49")
 
     table = analyzer.get_number_analysis_table()
-    st.dataframe(table, use_container_width=True, height=650)
+    table_df = pd.DataFrame(table)
+    st.dataframe(table_df, width="stretch", height=650)
 
 
 def render_patterns(analyzer: LottoAnalyzer):
@@ -1349,15 +1346,15 @@ def render_patterns(analyzer: LottoAnalyzer):
 
     with col1:
         st.markdown("### Najczęstsze pary")
-        st.dataframe(patterns["pairs"], use_container_width=True, height=420)
+        st.dataframe(pd.DataFrame(patterns["pairs"]), width="stretch", height=420)
 
     with col2:
         st.markdown("### Najczęstsze trójki")
-        st.dataframe(patterns["triples"], use_container_width=True, height=420)
+        st.dataframe(pd.DataFrame(patterns["triples"]), width="stretch", height=420)
 
     with col3:
         st.markdown("### Najczęstsze czwórki")
-        st.dataframe(patterns["quads"], use_container_width=True, height=420)
+        st.dataframe(pd.DataFrame(patterns["quads"]), width="stretch", height=420)
 
 
 def render_bystrzacha(analyzer: LottoAnalyzer):
@@ -1386,11 +1383,12 @@ def render_bystrzacha(analyzer: LottoAnalyzer):
     bystrzacha_ticket = analyzer.generate_bystrzacha_ticket()
 
     st.markdown("### Kupon Bystrzachy")
-    st.dataframe([bystrzacha_ticket], use_container_width=True, height=140)
+    bystrzacha_df = pd.DataFrame([bystrzacha_ticket])
+    st.dataframe(bystrzacha_df, width="stretch", height=140)
 
     st.markdown("### Analiza pozycji 1–6")
     table = analyzer.get_bystrzacha_analysis_table()
-    st.dataframe(table, use_container_width=True, height=420)
+    st.dataframe(pd.DataFrame(table), width="stretch", height=420)
 
 
 def render_diagnostics(diagnostics: Dict):
@@ -1402,7 +1400,7 @@ def render_diagnostics(diagnostics: Dict):
     col3.metric("Liczba stron", diagnostics.get("pages_total", 0))
 
     st.markdown("### Szczegóły parsera")
-    st.dataframe(diagnostics.get("pages", []), use_container_width=True, height=520)
+    st.dataframe(pd.DataFrame(diagnostics.get("pages", [])), width="stretch", height=520)
 
     with st.expander("Podgląd pełnej diagnostyki parsera"):
         st.json(diagnostics)
