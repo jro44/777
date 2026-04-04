@@ -3,7 +3,7 @@ import re
 import statistics
 from dataclasses import dataclass
 from itertools import combinations
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import fitz  # PyMuPDF
 import pandas as pd
@@ -906,10 +906,10 @@ def generate_szlaczek_variants(
 # GENERATOR
 # =========================================================
 class LottoTicketGenerator:
-    def __init__(self, analyzer: LottoAnalyzer, scorer: LottoScoringEngine, seed: int = DEFAULT_RANDOM_SEED):
+    def __init__(self, analyzer: LottoAnalyzer, scorer: LottoScoringEngine, seed: Optional[int] = None):
         self.a = analyzer
         self.s = scorer
-        self.rng = random.Random(seed)
+        self.rng = random.Random(seed) if seed is not None else random.Random()
 
     def generate_random_ticket(self) -> TicketResult:
         best = None
@@ -1199,6 +1199,11 @@ def render_help_tab() -> None:
             "Jak wyżej, ale z korektą układu i większym naciskiem na sensowną strukturę.",
             "Przykład najlepszego użycia: gdy chcesz różne kupony szlaczkowe, ale bardziej dopracowane."
         ),
+        (
+            "🎛️ Prawdziwie losowy tryb",
+            "Gdy jest włączony, aplikacja nie używa stałego seeda i przy każdym kliknięciu tworzy nowe wyniki.",
+            "Przykład najlepszego użycia: gdy chcesz naprawdę różne wyniki przy kolejnych kliknięciach."
+        ),
     ]
 
     for title, desc, ex in help_items:
@@ -1238,6 +1243,7 @@ def main():
 
         static_pool_size = st.selectbox("Pula dla trybu Losowy statyczny", [10, 12, 15, 18, 20], index=2)
 
+        true_random = st.checkbox("Prawdziwie losowy tryb", value=True)
         seed = st.number_input("Seed losowania", min_value=1, max_value=999999, value=DEFAULT_RANDOM_SEED)
         txt_filename = st.text_input("Nazwa pliku TXT do eksportu", value="lotto_kupony.txt")
 
@@ -1280,7 +1286,12 @@ def main():
 
     analyzer = LottoAnalyzer(draws)
     scorer = LottoScoringEngine(analyzer)
-    generator = LottoTicketGenerator(analyzer, scorer, seed=int(seed))
+
+    generator = LottoTicketGenerator(
+        analyzer,
+        scorer,
+        seed=None if true_random else int(seed),
+    )
 
     tab1, tab2, tab3, tab4 = st.tabs(["🚀 Generator", "📊 Analiza", "🧠 Szlaczek", "📚 Opisy funkcji"])
 
