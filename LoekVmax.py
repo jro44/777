@@ -1,4 +1,3 @@
-import io
 import random
 import re
 import statistics
@@ -15,7 +14,10 @@ import streamlit as st
 # KONFIGURACJA
 # =========================================================
 APP_TITLE = "🎯 Lotto PRO Generator"
-APP_SUBTITLE = "Losowy • Losowy statyczny • Hot • Cold • 50/50 • HOT MAX • Złoty Strzał • Ranking • Szlaczek"
+APP_SUBTITLE = (
+    "Losowy • Losowy statyczny • Hot • Cold • 50/50 • HOT MAX • "
+    "Złoty Strzał • Ranking • Szlaczek"
+)
 
 LOTTO_MIN = 1
 LOTTO_MAX = 49
@@ -97,14 +99,6 @@ APP_CSS = """
   font-size: .94rem;
   line-height: 1.55;
   color: #1f2937;
-}
-
-.help-box{
-  background: rgba(255,255,255,.75);
-  border: 1px solid rgba(13,122,52,0.16);
-  border-radius: 16px;
-  padding: 14px;
-  margin: 10px 0;
 }
 
 div.stButton > button{
@@ -209,13 +203,14 @@ def weighted_sample_without_replacement(
     population: List[int],
     weights: List[float],
     k: int,
-    rng: random.Random
+    rng: random.Random,
 ) -> List[int]:
     if k > len(population):
         raise ValueError("k nie może być większe niż populacja.")
     pop = population[:]
     wts = weights[:]
     result = []
+
     for _ in range(k):
         total = sum(wts)
         if total <= 0:
@@ -229,9 +224,59 @@ def weighted_sample_without_replacement(
                 if acc >= r:
                     pick_idx = i
                     break
+
         result.append(pop.pop(pick_idx))
         wts.pop(pick_idx)
+
     return sorted(result)
+
+
+def ticket_overlap(a: List[int], b: List[int]) -> int:
+    return len(set(a) & set(b))
+
+
+def is_diverse_enough(candidate: List[int], existing: List[List[int]], max_overlap: int = 3) -> bool:
+    for ex in existing:
+        if ticket_overlap(candidate, ex) > max_overlap:
+            return False
+    return True
+
+
+def basic_structure_score(nums: List[int]) -> float:
+    nums = sorted(nums)
+    score = 0.0
+
+    evens = count_even(nums)
+    if evens in (2, 3, 4):
+        score += 1.2
+    else:
+        score -= 0.8
+
+    spread = max(nums) - min(nums)
+    if 18 <= spread <= 40:
+        score += 1.4
+    else:
+        score -= 0.7
+
+    adj = count_adjacent_pairs(nums)
+    if adj <= 2:
+        score += 0.8
+    else:
+        score -= 0.8
+
+    run = max_run(nums)
+    if run <= 3:
+        score += 0.7
+    else:
+        score -= 1.0
+
+    total = sum(nums)
+    if 90 <= total <= 210:
+        score += 1.1
+    else:
+        score -= 0.6
+
+    return score
 
 
 # =========================================================
@@ -267,6 +312,7 @@ def _group_words_into_rows(words: List[Tuple], y_tolerance: float = 2.2) -> List
 
     for w in words_sorted:
         y = float(w[1])
+
         if current_y is None:
             current = [w]
             current_y = y
@@ -282,6 +328,7 @@ def _group_words_into_rows(words: List[Tuple], y_tolerance: float = 2.2) -> List
 
     if current:
         rows.append(sorted(current, key=lambda x: x[0]))
+
     return rows
 
 
@@ -296,7 +343,7 @@ def _extract_records_from_grid_words(
     num_min: int,
     num_max: int,
     pick_count: int,
-    title_fragment: str
+    title_fragment: str,
 ) -> List[Dict]:
     records = []
 
@@ -357,7 +404,7 @@ def load_draws_from_pdf_bytes(pdf_bytes: bytes) -> Tuple[List[Draw], Dict]:
         num_min=LOTTO_MIN,
         num_max=LOTTO_MAX,
         pick_count=LOTTO_PICK,
-        title_fragment="Lotto 6/49"
+        title_fragment="Lotto 6/49",
     )
 
     if not records:
@@ -420,6 +467,7 @@ class LottoAnalyzer:
         total = len(draws)
         if total == 0:
             return {n: 0.0 for n in range(low, high + 1)}
+
         pct = {}
         for n in range(low, high + 1):
             hits = sum(1 for d in draws if n in d)
@@ -436,25 +484,30 @@ class LottoAnalyzer:
     def _gap_stats(self, draws: List[List[int]], low: int, high: int) -> Tuple[Dict[int, float], Dict[int, float]]:
         positions = {n: [] for n in range(low, high + 1)}
         chronological = list(reversed(draws))
+
         for idx, d in enumerate(chronological):
             for n in d:
                 positions[n].append(idx)
 
         avg_gaps = {}
         consistency = {}
+
         for n in range(low, high + 1):
             pos = positions[n]
             if len(pos) < 2:
                 avg_gaps[n] = 999.0
                 consistency[n] = 0.0
                 continue
+
             gaps = [b - a for a, b in zip(pos, pos[1:])]
             avg_gaps[n] = safe_mean(gaps, 999.0)
+
             try:
                 std = statistics.pstdev(gaps) if len(gaps) > 1 else 0.0
                 consistency[n] = 1.0 / (1.0 + std)
             except Exception:
                 consistency[n] = 0.0
+
         return avg_gaps, consistency
 
     def _pair_counter(self, draws: List[List[int]]) -> Dict[Tuple[int, int], int]:
@@ -484,7 +537,7 @@ class LottoAnalyzer:
                 "target_even": 3,
                 "target_spread": 25.0,
                 "target_pairs": 0.5,
-                "target_sum": 0.0
+                "target_sum": 0.0,
             }
 
         even_counts = []
@@ -511,16 +564,19 @@ class LottoAnalyzer:
     def percent_df(self) -> pd.DataFrame:
         rows = []
         for n in range(LOTTO_MIN, LOTTO_MAX + 1):
-            rows.append({
-                "Liczba": n,
-                "Wystąpienia": self.freq[n],
-                "Procent_losowań": round(self.presence_pct[n], 2),
-                "Opóźnienie": self.last_seen[n],
-                "Średnia_przerwa": round(self.avg_gaps[n], 2),
-            })
+            rows.append(
+                {
+                    "Liczba": n,
+                    "Wystąpienia": self.freq[n],
+                    "Procent_losowań": round(self.presence_pct[n], 2),
+                    "Opóźnienie": self.last_seen[n],
+                    "Średnia_przerwa": round(self.avg_gaps[n], 2),
+                }
+            )
+
         return pd.DataFrame(rows).sort_values(
             ["Procent_losowań", "Wystąpienia", "Liczba"],
-            ascending=[False, False, True]
+            ascending=[False, False, True],
         ).reset_index(drop=True)
 
 
@@ -534,7 +590,7 @@ class LottoScoringEngine:
             self.a.presence_pct,
             self.a.last_seen,
             self.a.avg_gaps,
-            self.a.gap_consistency
+            self.a.gap_consistency,
         )
 
     def _build_number_scores(
@@ -545,12 +601,14 @@ class LottoScoringEngine:
         consistency_map: Dict[int, float],
     ) -> Dict[int, float]:
         raw = {}
+
         for n, pct in pct_map.items():
             hotness = pct
             recency_bonus = max(0.0, 18.0 - abs(last_seen_map[n] - 7))
             rhythm_bonus = consistency_map[n] * 25.0
             avg_gap_bonus = 0.0 if avg_gap_map[n] >= 900 else max(0.0, 12.0 - abs(avg_gap_map[n] - 8))
             raw[n] = hotness + recency_bonus + rhythm_bonus + avg_gap_bonus
+
         return normalize_score_dict(raw)
 
     def score_ticket(self, nums: List[int]) -> float:
@@ -568,7 +626,6 @@ class LottoScoringEngine:
         spread_penalty = abs(spread - self.a.target_profile["target_spread"]) / 85.0
 
         sum_penalty = abs(sum(nums) - self.a.target_profile["target_sum"]) / 220.0
-
         seq_penalty = max(0, max_run(nums) - 2) * 0.35
 
         recent_similarity_penalty = 0.0
@@ -579,7 +636,20 @@ class LottoScoringEngine:
             elif common == 6:
                 recent_similarity_penalty += 2.0
 
-        return base + pair_bonus + triple_bonus + quad_bonus - even_penalty - spread_penalty - sum_penalty - seq_penalty - recent_similarity_penalty
+        structure_bonus = basic_structure_score(nums)
+
+        return (
+            base
+            + pair_bonus
+            + triple_bonus
+            + quad_bonus
+            + structure_bonus
+            - even_penalty
+            - spread_penalty
+            - sum_penalty
+            - seq_penalty
+            - recent_similarity_penalty
+        )
 
 
 # =========================================================
@@ -615,7 +685,7 @@ def predict_single_path(
     high: int,
     window_short: int = 5,
     window_long: int = 10,
-    use_position_range: bool = True
+    use_position_range: bool = True,
 ) -> Tuple[int, Dict]:
     if len(path) < 3:
         pred = clamp(path[-1], low, high)
@@ -701,7 +771,7 @@ def predict_positions(
     high: int,
     window_short: int = 5,
     window_long: int = 10,
-    use_position_range: bool = True
+    use_position_range: bool = True,
 ) -> Tuple[List[int], List[Dict]]:
     results = []
     details = []
@@ -713,7 +783,7 @@ def predict_positions(
             high=high,
             window_short=window_short,
             window_long=window_long,
-            use_position_range=use_position_range
+            use_position_range=use_position_range,
         )
         info["position"] = idx
         results.append(pred)
@@ -743,13 +813,93 @@ def adjust_distribution(nums: List[int]) -> List[int]:
 def predict_from_szlaczek(draws: List[Draw], pro: bool = False) -> Tuple[List[int], List[Dict]]:
     paths = build_position_paths(draws, LOTTO_PICK)
     pred, details = predict_positions(
-        paths, LOTTO_MIN, LOTTO_MAX,
-        window_short=5, window_long=10, use_position_range=pro
+        paths,
+        LOTTO_MIN,
+        LOTTO_MAX,
+        window_short=5,
+        window_long=10,
+        use_position_range=pro,
     )
     fixed = sorted(fix_duplicates(pred, LOTTO_MIN, LOTTO_MAX))
     if pro:
         fixed = adjust_distribution(fixed)
     return fixed, details
+
+
+def build_position_variants(detail: Dict, low: int, high: int) -> List[int]:
+    center = int(detail["final"])
+    common = int(detail["common_delta"])
+    bounce = int(detail["bounce"])
+
+    raw_variants = [
+        center,
+        center - 1,
+        center + 1,
+        center + common,
+        center + bounce,
+    ]
+
+    cleaned = []
+    for v in raw_variants:
+        v = clamp(v, low, high)
+        if v not in cleaned:
+            cleaned.append(v)
+
+    return cleaned
+
+
+def generate_szlaczek_variants(
+    draws: List[Draw],
+    scorer: "LottoScoringEngine",
+    count: int = 5,
+    pro: bool = True,
+) -> Tuple[List[TicketResult], List[Dict]]:
+    _, details = predict_from_szlaczek(draws, pro=pro)
+
+    per_position_variants = []
+    for d in details:
+        per_position_variants.append(build_position_variants(d, LOTTO_MIN, LOTTO_MAX))
+
+    rng = random.Random()
+    candidates: List[TicketResult] = []
+    seen = set()
+
+    for _ in range(1200):
+        nums = []
+        for variants in per_position_variants:
+            nums.append(rng.choice(variants))
+
+        nums = sorted(fix_duplicates(nums, LOTTO_MIN, LOTTO_MAX))
+        if pro:
+            nums = adjust_distribution(nums)
+
+        key = tuple(nums)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        score = scorer.score_ticket(nums)
+        candidates.append(
+            TicketResult(
+                "Szlaczek wariantowy PRO" if pro else "Szlaczek wariantowy",
+                nums,
+                score,
+                "Wariant wygenerowany z kilku prognoz pozycyjnych dla każdej ścieżki szlaczka.",
+            )
+        )
+
+    candidates.sort(key=lambda x: x.score, reverse=True)
+
+    final = []
+    chosen = []
+    for c in candidates:
+        if is_diverse_enough(c.nums, chosen, max_overlap=3):
+            final.append(c)
+            chosen.append(c.nums)
+        if len(final) >= count:
+            break
+
+    return final, details
 
 
 # =========================================================
@@ -762,46 +912,92 @@ class LottoTicketGenerator:
         self.rng = random.Random(seed)
 
     def generate_random_ticket(self) -> TicketResult:
-        nums = sorted(self.rng.sample(list(range(LOTTO_MIN, LOTTO_MAX + 1)), LOTTO_PICK))
-        score = self.s.score_ticket(nums)
-        return TicketResult("Losowy", nums, score, "Czysty los bez analizy danych.")
+        best = None
+        best_score = -999999.0
+
+        for _ in range(250):
+            nums = sorted(self.rng.sample(list(range(LOTTO_MIN, LOTTO_MAX + 1)), LOTTO_PICK))
+            score = self.s.score_ticket(nums)
+            if score > best_score:
+                best_score = score
+                best = nums
+
+        return TicketResult(
+            "Losowy",
+            best,
+            best_score,
+            "Losowy zestaw wybrany z wielu kandydatów tak, aby był bardziej różnorodny i miał lepszy układ.",
+        )
 
     def generate_static_random_ticket(self, pool_size: int = 15) -> TicketResult:
         hot_pool = self._top_numbers(self.a.presence_pct, pool_size)
-        nums = sorted(self.rng.sample(hot_pool, LOTTO_PICK))
-        score = self.s.score_ticket(nums)
+
+        best = None
+        best_score = -999999.0
+
+        for _ in range(250):
+            nums = sorted(self.rng.sample(hot_pool, LOTTO_PICK))
+            score = self.s.score_ticket(nums)
+            if score > best_score:
+                best_score = score
+                best = nums
+
         return TicketResult(
             "Losowy statyczny",
-            nums,
-            score,
-            f"Losowy zestaw wylosowany tylko z ustalonej puli TOP {pool_size} liczb o najwyższym procencie wystąpień."
+            best,
+            best_score,
+            f"Najlepszy losowy zestaw wybrany z wielu prób, ale tylko z puli TOP {pool_size} liczb o najwyższym procencie wystąpień.",
         )
 
     def generate_hot_ticket(self, top_n: int = 18) -> TicketResult:
         pool = self._top_numbers(self.a.presence_pct, top_n)
-        nums = sorted(self.rng.sample(pool, LOTTO_PICK))
-        score = self.s.score_ticket(nums)
-        return TicketResult("Hot %", nums, score, "Zestaw z puli liczb najczęściej występujących procentowo.")
+
+        best = None
+        best_score = -999999.0
+        for _ in range(180):
+            nums = sorted(self.rng.sample(pool, LOTTO_PICK))
+            score = self.s.score_ticket(nums)
+            if score > best_score:
+                best_score = score
+                best = nums
+
+        return TicketResult("Hot %", best, best_score, "Zestaw z puli liczb najczęściej występujących procentowo.")
 
     def generate_cold_ticket(self, bottom_n: int = 18) -> TicketResult:
         pool = self._bottom_numbers(self.a.presence_pct, bottom_n)
-        nums = sorted(self.rng.sample(pool, LOTTO_PICK))
-        score = self.s.score_ticket(nums)
-        return TicketResult("Cold %", nums, score, "Zestaw z puli liczb najrzadziej występujących procentowo.")
+
+        best = None
+        best_score = -999999.0
+        for _ in range(180):
+            nums = sorted(self.rng.sample(pool, LOTTO_PICK))
+            score = self.s.score_ticket(nums)
+            if score > best_score:
+                best_score = score
+                best = nums
+
+        return TicketResult("Cold %", best, best_score, "Zestaw z puli liczb najrzadziej występujących procentowo.")
 
     def generate_hybrid_ticket(self, hot_n: int = 2, cold_n: int = 2) -> TicketResult:
         hot_pool = self._top_numbers(self.a.presence_pct, 18)
         cold_pool = self._bottom_numbers(self.a.presence_pct, 18)
         neutral = [n for n in range(LOTTO_MIN, LOTTO_MAX + 1) if n not in hot_pool and n not in cold_pool]
 
-        nums = []
-        nums.extend(self.rng.sample(hot_pool, hot_n))
-        nums.extend(self.rng.sample([n for n in cold_pool if n not in nums], cold_n))
-        nums.extend(self.rng.sample([n for n in neutral if n not in nums], LOTTO_PICK - len(nums)))
+        best = None
+        best_score = -999999.0
 
-        nums = sorted(nums)
-        score = self.s.score_ticket(nums)
-        return TicketResult("50/50", nums, score, "Mieszanka hot, cold i neutral dla zbalansowanego kuponu.")
+        for _ in range(220):
+            nums = []
+            nums.extend(self.rng.sample(hot_pool, hot_n))
+            nums.extend(self.rng.sample([n for n in cold_pool if n not in nums], cold_n))
+            nums.extend(self.rng.sample([n for n in neutral if n not in nums], LOTTO_PICK - len(nums)))
+            nums = sorted(nums)
+
+            score = self.s.score_ticket(nums)
+            if score > best_score:
+                best_score = score
+                best = nums
+
+        return TicketResult("50/50", best, best_score, "Mieszanka hot, cold i neutral dla zbalansowanego kuponu.")
 
     def generate_hot_max_ticket(self) -> TicketResult:
         nums = sorted(self._top_numbers(self.a.presence_pct, LOTTO_PICK))
@@ -825,11 +1021,11 @@ class LottoTicketGenerator:
             "Złoty Strzał",
             best_ticket,
             best_score,
-            "Najmocniejszy kupon znaleziony z wykorzystaniem score częstotliwości, rytmu, opóźnienia i zgodności układu."
+            "Najmocniejszy kupon znaleziony z wykorzystaniem score częstotliwości, rytmu, opóźnienia i zgodności układu.",
         )
 
     def generate_probability_ranking(self, candidates: int = DEFAULT_CANDIDATES, top_n: int = 10) -> List[TicketResult]:
-        results = []
+        results: List[TicketResult] = []
         seen = set()
 
         population = list(range(LOTTO_MIN, LOTTO_MAX + 1))
@@ -847,12 +1043,22 @@ class LottoTicketGenerator:
                     "Ranking prawdopodobieństwa",
                     list(nums),
                     score,
-                    "Kupon rankingowy z dużej puli kandydatów ocenionych przez silnik scoringu."
+                    "Kupon rankingowy z dużej puli kandydatów ocenionych przez silnik scoringu.",
                 )
             )
 
         results.sort(key=lambda x: x.score, reverse=True)
-        return results[:top_n]
+
+        final = []
+        chosen = []
+        for r in results:
+            if is_diverse_enough(r.nums, chosen, max_overlap=3):
+                final.append(r)
+                chosen.append(r.nums)
+            if len(final) >= top_n:
+                break
+
+        return final
 
     def generate_szlaczek_ticket(self, pro: bool = False) -> Tuple[TicketResult, List[Dict]]:
         nums, details = predict_from_szlaczek(self.a.draws, pro=pro)
@@ -860,10 +1066,13 @@ class LottoTicketGenerator:
         mode = "Szlaczek PRO" if pro else "Szlaczek"
         note = (
             "Prognoza pozycyjna na bazie trajektorii każdej pozycji osobno + korekta rozkładu."
-            if pro else
-            "Prognoza pozycyjna na bazie trajektorii każdej pozycji osobno."
+            if pro
+            else "Prognoza pozycyjna na bazie trajektorii każdej pozycji osobno."
         )
         return TicketResult(mode, nums, score, note), details
+
+    def generate_szlaczek_multi(self, count: int = 5, pro: bool = True) -> Tuple[List[TicketResult], List[Dict]]:
+        return generate_szlaczek_variants(self.a.draws, self.s, count=count, pro=pro)
 
     def _top_numbers(self, pct_map: Dict[int, float], k: int) -> List[int]:
         return [n for n, _ in sorted(pct_map.items(), key=lambda x: (-x[1], x[0]))[:k]]
@@ -892,24 +1101,26 @@ def render_ticket(ticket: TicketResult, highlight: bool = False) -> None:
           </div>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
 
 def render_pattern_details(details: List[Dict]) -> None:
     rows = []
     for d in details:
-        rows.append({
-            "Pozycja": d["position"],
-            "Ostatnia wartość": d["last_value"],
-            "Śr. delta 5": d["avg_delta_short"],
-            "Śr. delta 10": d["avg_delta_long"],
-            "Najczęstsza delta": d["common_delta"],
-            "Bounce": d["bounce"],
-            "Pewność": d["confidence"],
-            "Prognoza surowa": d["raw"],
-            "Prognoza końcowa": d["final"],
-        })
+        rows.append(
+            {
+                "Pozycja": d["position"],
+                "Ostatnia wartość": d["last_value"],
+                "Śr. delta 5": d["avg_delta_short"],
+                "Śr. delta 10": d["avg_delta_long"],
+                "Najczęstsza delta": d["common_delta"],
+                "Bounce": d["bounce"],
+                "Pewność": d["confidence"],
+                "Prognoza surowa": d["raw"],
+                "Prognoza końcowa": d["final"],
+            }
+        )
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
@@ -930,63 +1141,63 @@ def render_help_tab() -> None:
     help_items = [
         (
             "🎲 Losowy",
-            "Generuje całkowicie losowy zestaw 6 z 49 bez opierania się na historii.",
-            "Przykład najlepszego użycia: gdy chcesz czysty los i szybkie kupony bez analizy."
+            "Generuje wiele losowych kandydatów i wybiera taki, który ma lepszy układ. Dzięki temu kupon jest nadal losowy, ale sensowniejszy.",
+            "Przykład najlepszego użycia: gdy chcesz czysty los, ale nie chcesz dziwnych układów."
         ),
         (
             "🎯 Losowy statyczny",
-            "Tworzy stałą pulę TOP liczb z najwyższym procentem wystąpień w PDF, a potem losuje zestaw tylko z tej puli.",
-            "Przykład najlepszego użycia: gdy chcesz różne kupony, ale wyłącznie z najmocniejszych historycznie liczb."
+            "Buduje stałą pulę TOP liczb z największym procentem wystąpień i z niej losuje wiele kandydatów, wybierając lepszy.",
+            "Przykład najlepszego użycia: gdy chcesz różne kupony, ale tylko z najsilniejszych historycznie liczb."
         ),
         (
             "🔥 Hot %",
-            "Buduje kupon z puli liczb, które procentowo występowały najczęściej.",
-            "Przykład najlepszego użycia: gdy chcesz grać liczbami gorącymi z całej historii."
+            "Buduje zestaw z puli gorących liczb i wybiera lepszy wariant.",
+            "Przykład najlepszego użycia: gdy chcesz grać liczbami gorącymi, ale nie zawsze tym samym układem."
         ),
         (
             "❄️ Cold %",
-            "Buduje kupon z puli liczb, które procentowo występowały najrzadziej.",
-            "Przykład najlepszego użycia: gdy chcesz zagrać pod liczby rzadkie i mniej oczywiste."
+            "Buduje zestaw z puli zimnych liczb i wybiera lepszy wariant.",
+            "Przykład najlepszego użycia: gdy chcesz szukać mniej oczywistych kombinacji."
         ),
         (
             "⚖️ 50/50",
-            "Miesza pule hot, cold i neutral, żeby zestaw nie był skrajny.",
-            "Przykład najlepszego użycia: gdy chcesz balansu między popularnymi a rzadkimi liczbami."
+            "Miesza pule hot, cold i neutral, a potem wybiera lepszy kandydat.",
+            "Przykład najlepszego użycia: gdy chcesz balansu i różnorodności."
         ),
         (
             "📌 HOT MAX",
-            "Buduje sztywny zestaw z 6 najmocniejszych liczb procentowo.",
-            "Przykład najlepszego użycia: gdy chcesz najprostszy kupon oparty wyłącznie o top częstotliwości."
+            "Sztywny zestaw z 6 najmocniejszych liczb procentowo.",
+            "Przykład najlepszego użycia: gdy chcesz najprostszy wariant oparty o top liczby."
         ),
         (
             "🏆 Złoty Strzał",
-            "Silnik tworzy wiele kandydatów i wybiera statystycznie najmocniejszy według score.",
-            "Przykład najlepszego użycia: gdy chcesz dostać jeden najmocniejszy kupon."
+            "Najmocniejszy kupon znaleziony z dużej puli kandydatów.",
+            "Przykład najlepszego użycia: gdy chcesz jeden najlepszy kupon."
         ),
         (
             "📈 Ranking TOP 10",
-            "Generator tworzy dużą pulę kandydatów i pokazuje TOP kupony o najwyższym score.",
-            "Przykład najlepszego użycia: gdy chcesz dostać 10 najlepszych kuponów do wyboru."
+            "Pokazuje 10 najlepszych i jednocześnie dość różnych kuponów.",
+            "Przykład najlepszego użycia: gdy chcesz kilka propozycji do wyboru."
         ),
         (
             "🧠 Szlaczek",
-            "Analizuje każdą pozycję osobno: 1→1, 2→2, 3→3, 4→4, 5→5, 6→6. Patrzy na delty, odbicia i trend.",
-            "Przykład najlepszego użycia: gdy chcesz typować na bazie wizualnego toru ruchu każdej pozycji."
+            "Jedna prognoza pozycyjna oparta o ruch każdej pozycji osobno.",
+            "Przykład najlepszego użycia: gdy chcesz jeden klasyczny kupon szlaczkowy."
         ),
         (
             "🚀 Szlaczek PRO",
-            "To samo co szlaczek, ale z korektą zakresów pozycji i poprawą układu zestawu.",
-            "Przykład najlepszego użycia: gdy chcesz zachować logikę szlaczka, ale ograniczyć dziwne układy."
+            "Szlaczek z korektą rozkładu i zakresów pozycji.",
+            "Przykład najlepszego użycia: gdy chcesz bardziej naturalny układ końcowy."
         ),
         (
-            "📂 Tryb bez PDF",
-            "Aplikacja działa na małym zestawie danych startowych, żeby dało się testować interfejs od razu.",
-            "Przykład najlepszego użycia: gdy chcesz szybko sprawdzić działanie aplikacji."
+            "🧠 Szlaczek TOP 5",
+            "Tworzy kilka wariantów dla każdej pozycji i składa z nich różne kupony.",
+            "Przykład najlepszego użycia: gdy chcesz kilka różnych kuponów opartych o szlaczek."
         ),
         (
-            "📄 Tryb z PDF",
-            "Aplikacja czyta plik Lotto 6/49 z układu siatki i buduje pełną analizę.",
-            "Przykład najlepszego użycia: gdy chcesz pełną analizę rzeczywistych losowań."
+            "🚀 Szlaczek PRO TOP 5",
+            "Jak wyżej, ale z korektą układu i większym naciskiem na sensowną strukturę.",
+            "Przykład najlepszego użycia: gdy chcesz różne kupony szlaczkowe, ale bardziej dopracowane."
         ),
     ]
 
@@ -1009,38 +1220,25 @@ def main():
     with st.sidebar:
         st.markdown("## ⚙️ Ustawienia")
 
-        data_mode = st.radio(
-            "Źródło danych",
-            ["Tryb bez PDF", "Tryb z PDF"],
-            index=0
-        )
+        data_mode = st.radio("Źródło danych", ["Tryb bez PDF", "Tryb z PDF"], index=0)
 
         uploaded_pdf = None
         if data_mode == "Tryb z PDF":
             uploaded_pdf = st.file_uploader("Wgraj PDF Lotto 6/49", type=["pdf"])
 
-        history_window = st.selectbox(
-            "Zakres historii do analizy",
-            [50, 100, 250, 500, 999],
-            index=4
-        )
+        history_window = st.selectbox("Zakres historii do analizy", [50, 100, 250, 500, 999], index=4)
 
         ranking_candidates = st.slider(
             "Ile kandydatów dla rankingu i złotego strzału",
             min_value=300,
             max_value=10000,
             value=3000,
-            step=100
+            step=100,
         )
 
-        static_pool_size = st.selectbox(
-            "Pula dla trybu Losowy statyczny",
-            [10, 12, 15, 18, 20],
-            index=2
-        )
+        static_pool_size = st.selectbox("Pula dla trybu Losowy statyczny", [10, 12, 15, 18, 20], index=2)
 
         seed = st.number_input("Seed losowania", min_value=1, max_value=999999, value=DEFAULT_RANDOM_SEED)
-
         txt_filename = st.text_input("Nazwa pliku TXT do eksportu", value="lotto_kupony.txt")
 
     draws: List[Draw] = []
@@ -1055,7 +1253,7 @@ def main():
                     "draws_found": len(draws),
                     "latest_draw_id": draws[0].draw_id,
                     "oldest_draw_id": draws[-1].draw_id,
-                    "mode": "fallback_demo"
+                    "mode": "fallback_demo",
                 }
             else:
                 pdf_bytes = uploaded_pdf.read()
@@ -1066,7 +1264,7 @@ def main():
                 "draws_found": len(draws),
                 "latest_draw_id": draws[0].draw_id,
                 "oldest_draw_id": draws[-1].draw_id,
-                "mode": "demo"
+                "mode": "demo",
             }
     except Exception as e:
         st.error(f"Błąd wczytywania danych: {e}")
@@ -1075,7 +1273,7 @@ def main():
             "draws_found": len(draws),
             "latest_draw_id": draws[0].draw_id,
             "oldest_draw_id": draws[-1].draw_id,
-            "mode": "fallback_error"
+            "mode": "fallback_error",
         }
 
     draws = draws[: min(history_window, len(draws))]
@@ -1084,12 +1282,7 @@ def main():
     scorer = LottoScoringEngine(analyzer)
     generator = LottoTicketGenerator(analyzer, scorer, seed=int(seed))
 
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "🚀 Generator",
-        "📊 Analiza",
-        "🧠 Szlaczek",
-        "📚 Opisy funkcji"
-    ])
+    tab1, tab2, tab3, tab4 = st.tabs(["🚀 Generator", "📊 Analiza", "🧠 Szlaczek", "📚 Opisy funkcji"])
 
     with tab1:
         c1, c2, c3 = st.columns(3)
@@ -1140,6 +1333,14 @@ def main():
                 t, _ = generator.generate_szlaczek_ticket(pro=True)
                 st.session_state.generated_tickets = [t]
 
+            if st.button("🧠 Generuj: Szlaczek TOP 5"):
+                tickets, _ = generator.generate_szlaczek_multi(count=5, pro=False)
+                st.session_state.generated_tickets = tickets
+
+            if st.button("🚀 Generuj: Szlaczek PRO TOP 5"):
+                tickets, _ = generator.generate_szlaczek_multi(count=5, pro=True)
+                st.session_state.generated_tickets = tickets
+
             if st.button("🧹 Wyczyść wyniki"):
                 st.session_state.generated_tickets = []
 
@@ -1155,7 +1356,7 @@ def main():
                 "💾 Pobierz wyniki jako TXT",
                 data=txt_content.encode("utf-8"),
                 file_name=sanitize_txt_filename(txt_filename),
-                mime="text/plain"
+                mime="text/plain",
             )
         else:
             st.info("Wybierz jedną z funkcji generatora, aby zobaczyć kupony.")
@@ -1179,20 +1380,22 @@ def main():
         st.markdown("### Ostatnie losowania")
         rows = []
         for d in draws[:15]:
-            rows.append({
-                "ID": d.draw_id,
-                "Liczby": fmt_nums(d.nums),
-                "Suma": sum(d.nums),
-                "Parzyste": count_even(d.nums),
-                "Pary kolejne": count_adjacent_pairs(d.nums),
-            })
+            rows.append(
+                {
+                    "ID": d.draw_id,
+                    "Liczby": fmt_nums(d.nums),
+                    "Suma": sum(d.nums),
+                    "Parzyste": count_even(d.nums),
+                    "Pary kolejne": count_adjacent_pairs(d.nums),
+                }
+            )
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     with tab3:
         st.markdown("### Moduł szlaczka")
         st.caption("Każda pozycja jest analizowana osobno: 1→1, 2→2, 3→3, 4→4, 5→5, 6→6.")
 
-        szl_simple, details_simple = generator.generate_szlaczek_ticket(pro=False)
+        szl_simple, _ = generator.generate_szlaczek_ticket(pro=False)
         szl_pro, details_pro = generator.generate_szlaczek_ticket(pro=True)
 
         st.markdown("#### Wynik Szlaczek")
@@ -1212,8 +1415,7 @@ def main():
         with st.expander("Jak najlepiej używać funkcji Szlaczek?"):
             st.write(
                 "Najlepiej używać jej wtedy, gdy chcesz typować zestaw na podstawie trajektorii pozycji. "
-                "To nie jest zwykłe liczenie częstotliwości, tylko analiza ruchu każdej pozycji osobno. "
-                "Wersja PRO zwykle daje bardziej naturalny układ końcowy."
+                "Wersje TOP 5 są lepsze, jeśli chcesz kilka różnych propozycji zamiast jednego sztywnego wyniku."
             )
 
     with tab4:
