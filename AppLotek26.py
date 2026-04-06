@@ -96,24 +96,73 @@ def ticket_distance(a: List[int], b: List[int]) -> int:
 
 
 # =========================================================
-# PARSER PDF - WERSJA ODPORNA NA STREAMLIT CLOUD
+# PARSER PDF - WERSJA NAPRAWIONA
 # =========================================================
-def extract_rows_from_pdf_words(pdf_bytes: bytes) -> List[List[str]]:
+DRAW_LINE_RE = re.compile(r"^\s*(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s*$")
+DRAW_NO_RE = re.compile(r"^\d{4,5}$")
+
+
+def parse_rows_from_text_layer(pdf_bytes: bytes) -> List[List[str]]:
     """
-    Odporny parser:
-    - pobiera słowa z pozycjami,
-    - grupuje po współrzędnej Y,
-    - sortuje po X.
-    Dzięki temu działa stabilniej niż zwykłe get_text("text").
+    Najpewniejsza droga dla tego PDF:
+    get_text("text") zwraca gotowe linie jak:
+    03 06 12 26 27 49
+    7335
+    """
+    rows: List[List[str]] = []
+
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        for page in doc:
+            text = page.get_text("text")
+            if not text:
+                continue
+
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                rows.append(line.split())
+
+    return rows
+
+
+def parse_rows_from_blocks(pdf_bytes: bytes) -> List[List[str]]:
+    """
+    Fallback 2: bloki tekstowe.
+    """
+    rows: List[List[str]] = []
+
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        for page in doc:
+            blocks = page.get_text("blocks")
+            if not blocks:
+                continue
+
+            for block in blocks:
+                if len(block) < 5:
+                    continue
+                text = str(block[4]).strip()
+                if not text:
+                    continue
+
+                for line in text.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rows.append(line.split())
+
+    return rows
+
+
+def parse_rows_from_words(pdf_bytes: bytes) -> List[List[str]]:
+    """
+    Fallback 3: słowa z pozycjami.
     """
     rows: List[List[str]] = []
 
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
         for page in doc:
             words = page.get_text("words")
-            # Format:
-            # (x0, y0, x1, y1, "text", block_no, line_no, word_no)
-
             if not words:
                 continue
 
@@ -122,52 +171,57 @@ def extract_rows_from_pdf_words(pdf_bytes: bytes) -> List[List[str]]:
             for word in words:
                 x0, y0, x1, y1, text, *_ = word
                 text = str(text).strip()
-
                 if not text:
                     continue
 
-                # Grupowanie po przybliżonym Y
                 y_key = round(float(y0), 1)
                 grouped.setdefault(y_key, []).append((float(x0), text))
 
             for y_key in sorted(grouped.keys()):
                 row = grouped[y_key]
                 row.sort(key=lambda item: item[0])
-                tokens = [token for _, token in row]
-                rows.append(tokens)
+                rows.append([token for _, token in row])
 
     return rows
 
 
-def parse_lotto_pdf_bytes(pdf_bytes: bytes) -> List[DrawRecord]:
-    """
-    Parser ULTRA-ROBUST:
-    - wykrywa wiersze z 6 liczbami Lotto,
-    - wykrywa osobne numery losowań 4-5 cyfrowe,
-    - obsługuje też wiersze mieszane.
-    """
-    rows = extract_rows_from_pdf_words(pdf_bytes)
-
+def extract_draws_and_numbers_from_rows(rows: List[List[str]]) -> Tuple[List[List[int]], List[int]]:
     draw_rows: List[List[int]] = []
     draw_numbers: List[int] = []
 
     for tokens in rows:
         cleaned = []
         for t in tokens:
-            t = t.replace("\xa0", " ").strip()
+            t = str(t).replace("\xa0", " ").strip()
             if t:
                 cleaned.append(t)
 
         if not cleaned:
             continue
 
-        joined = " ".join(cleaned).lower()
+        joined = " ".join(cleaned).strip()
+        joined_lower = joined.lower()
 
-        # Pomijamy nagłówki
-        if "lotto" in joined:
+        if "lotto" in joined_lower:
             continue
 
-        # Wyciągnij tokeny numeryczne
+        # przypadek idealny: dokładnie 6 liczb w linii
+        m = DRAW_LINE_RE.match(joined)
+        if m:
+            nums = [int(x) for x in m.groups()]
+            nums = normalize_draw(nums)
+            if valid_draw(nums):
+                draw_rows.append(nums)
+            continue
+
+        # przypadek pojedynczego numeru losowania
+        if DRAW_NO_RE.fullmatch(joined):
+            n = int(joined)
+            if n > MAX_N:
+                draw_numbers.append(n)
+            continue
+
+        # fallback: wyciągnij wszystkie tokeny numeryczne
         numeric_tokens: List[int] = []
         for t in cleaned:
             if re.fullmatch(r"\d{1,5}", t):
@@ -176,19 +230,6 @@ def parse_lotto_pdf_bytes(pdf_bytes: bytes) -> List[DrawRecord]:
         if not numeric_tokens:
             continue
 
-        # Przypadek 1: dokładnie 6 liczb Lotto
-        if len(numeric_tokens) == 6 and all(MIN_N <= x <= MAX_N for x in numeric_tokens):
-            nums = normalize_draw(numeric_tokens)
-            if valid_draw(nums):
-                draw_rows.append(nums)
-            continue
-
-        # Przypadek 2: pojedynczy numer losowania
-        if len(numeric_tokens) == 1 and 1000 <= numeric_tokens[0] <= 99999:
-            draw_numbers.append(numeric_tokens[0])
-            continue
-
-        # Przypadek 3: mieszany wiersz
         small = [x for x in numeric_tokens if MIN_N <= x <= MAX_N]
         big = [x for x in numeric_tokens if x > MAX_N]
 
@@ -200,20 +241,65 @@ def parse_lotto_pdf_bytes(pdf_bytes: bytes) -> List[DrawRecord]:
         if len(big) == 1 and 1000 <= big[0] <= 99999:
             draw_numbers.append(big[0])
 
-    # Łączenie liczb z numerami losowań
+    return draw_rows, draw_numbers
+
+
+def score_parse_result(draw_rows: List[List[int]], draw_numbers: List[int]) -> int:
+    """
+    Wybieramy najlepszy parser po liczbie wykrytych losowań.
+    """
+    return len(draw_rows) * 10 + min(len(draw_rows), len(draw_numbers))
+
+
+def parse_lotto_pdf_bytes(pdf_bytes: bytes) -> List[DrawRecord]:
+    """
+    Parser wielotorowy:
+    1) text
+    2) blocks
+    3) words
+    Bierzemy najlepszy wynik.
+    """
+    candidates = []
+
+    for parser_name, parser_fn in [
+        ("text", parse_rows_from_text_layer),
+        ("blocks", parse_rows_from_blocks),
+        ("words", parse_rows_from_words),
+    ]:
+        try:
+            rows = parser_fn(pdf_bytes)
+            draw_rows, draw_numbers = extract_draws_and_numbers_from_rows(rows)
+            candidates.append((parser_name, rows, draw_rows, draw_numbers))
+        except Exception:
+            candidates.append((parser_name, [], [], []))
+
+    best_name = None
+    best_rows = []
+    best_draw_rows = []
+    best_draw_numbers = []
+    best_score = -1
+
+    for parser_name, rows, draw_rows, draw_numbers in candidates:
+        current_score = score_parse_result(draw_rows, draw_numbers)
+        if current_score > best_score:
+            best_score = current_score
+            best_name = parser_name
+            best_rows = rows
+            best_draw_rows = draw_rows
+            best_draw_numbers = draw_numbers
+
     records: List[DrawRecord] = []
-    common = min(len(draw_rows), len(draw_numbers))
 
+    common = min(len(best_draw_rows), len(best_draw_numbers))
     for i in range(common):
-        records.append(DrawRecord(draw_no=draw_numbers[i], numbers=draw_rows[i]))
+        records.append(DrawRecord(draw_no=best_draw_numbers[i], numbers=best_draw_rows[i]))
 
-    for i in range(common, len(draw_rows)):
-        records.append(DrawRecord(draw_no=None, numbers=draw_rows[i]))
+    for i in range(common, len(best_draw_rows)):
+        records.append(DrawRecord(draw_no=None, numbers=best_draw_rows[i]))
 
-    # Deduplikacja po samych liczbach
+    # deduplikacja po liczbach
     unique_records: List[DrawRecord] = []
     seen = set()
-
     for rec in records:
         key = tuple(rec.numbers)
         if key not in seen:
@@ -1237,7 +1323,6 @@ def main():
 
     draws_all = get_draws(records)
 
-    # DEBUG
     st.write("DEBUG - liczba rekordów:", len(records))
     st.write("DEBUG - liczba poprawnych losowań:", len(draws_all))
     if records[:5]:
