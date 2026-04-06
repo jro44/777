@@ -96,51 +96,111 @@ def ticket_distance(a: List[int], b: List[int]) -> int:
 
 
 # =========================================================
-# PARSER PDF
+# PARSER PDF - WERSJA ODPORNA NA STREAMLIT CLOUD
 # =========================================================
-def extract_lines_from_pdf_bytes(pdf_bytes: bytes) -> List[str]:
-    lines = []
+def extract_rows_from_pdf_words(pdf_bytes: bytes) -> List[List[str]]:
+    """
+    Odporny parser:
+    - pobiera słowa z pozycjami,
+    - grupuje po współrzędnej Y,
+    - sortuje po X.
+    Dzięki temu działa stabilniej niż zwykłe get_text("text").
+    """
+    rows: List[List[str]] = []
+
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
         for page in doc:
-            text = page.get_text("text")
-            page_lines = [line.strip() for line in text.splitlines() if line.strip()]
-            lines.extend(page_lines)
-    return lines
+            words = page.get_text("words")
+            # Format:
+            # (x0, y0, x1, y1, "text", block_no, line_no, word_no)
+
+            if not words:
+                continue
+
+            grouped: Dict[float, List[Tuple[float, str]]] = {}
+
+            for word in words:
+                x0, y0, x1, y1, text, *_ = word
+                text = str(text).strip()
+
+                if not text:
+                    continue
+
+                # Grupowanie po przybliżonym Y
+                y_key = round(float(y0), 1)
+                grouped.setdefault(y_key, []).append((float(x0), text))
+
+            for y_key in sorted(grouped.keys()):
+                row = grouped[y_key]
+                row.sort(key=lambda item: item[0])
+                tokens = [token for _, token in row]
+                rows.append(tokens)
+
+    return rows
 
 
 def parse_lotto_pdf_bytes(pdf_bytes: bytes) -> List[DrawRecord]:
     """
-    Parser pod układ:
-    - linie z dokładnie 6 liczbami
-    - osobne linie z numerami losowań 4-5 cyfr
+    Parser ULTRA-ROBUST:
+    - wykrywa wiersze z 6 liczbami Lotto,
+    - wykrywa osobne numery losowań 4-5 cyfrowe,
+    - obsługuje też wiersze mieszane.
     """
-    six_pattern = re.compile(
-        r"^\s*(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s*$"
-    )
-    draw_no_pattern = re.compile(r"^\d{4,5}$")
-
-    lines = extract_lines_from_pdf_bytes(pdf_bytes)
+    rows = extract_rows_from_pdf_words(pdf_bytes)
 
     draw_rows: List[List[int]] = []
     draw_numbers: List[int] = []
 
-    for line in lines:
-        if line.lower().startswith("lotto"):
+    for tokens in rows:
+        cleaned = []
+        for t in tokens:
+            t = t.replace("\xa0", " ").strip()
+            if t:
+                cleaned.append(t)
+
+        if not cleaned:
             continue
 
-        m = six_pattern.match(line)
-        if m:
-            nums = [int(x) for x in m.groups()]
-            nums = normalize_draw(nums)
+        joined = " ".join(cleaned).lower()
+
+        # Pomijamy nagłówki
+        if "lotto" in joined:
+            continue
+
+        # Wyciągnij tokeny numeryczne
+        numeric_tokens: List[int] = []
+        for t in cleaned:
+            if re.fullmatch(r"\d{1,5}", t):
+                numeric_tokens.append(int(t))
+
+        if not numeric_tokens:
+            continue
+
+        # Przypadek 1: dokładnie 6 liczb Lotto
+        if len(numeric_tokens) == 6 and all(MIN_N <= x <= MAX_N for x in numeric_tokens):
+            nums = normalize_draw(numeric_tokens)
             if valid_draw(nums):
                 draw_rows.append(nums)
             continue
 
-        if draw_no_pattern.match(line):
-            n = int(line)
-            if n > MAX_N:
-                draw_numbers.append(n)
+        # Przypadek 2: pojedynczy numer losowania
+        if len(numeric_tokens) == 1 and 1000 <= numeric_tokens[0] <= 99999:
+            draw_numbers.append(numeric_tokens[0])
+            continue
 
+        # Przypadek 3: mieszany wiersz
+        small = [x for x in numeric_tokens if MIN_N <= x <= MAX_N]
+        big = [x for x in numeric_tokens if x > MAX_N]
+
+        if len(small) == 6:
+            nums = normalize_draw(small)
+            if valid_draw(nums):
+                draw_rows.append(nums)
+
+        if len(big) == 1 and 1000 <= big[0] <= 99999:
+            draw_numbers.append(big[0])
+
+    # Łączenie liczb z numerami losowań
     records: List[DrawRecord] = []
     common = min(len(draw_rows), len(draw_numbers))
 
@@ -150,8 +210,10 @@ def parse_lotto_pdf_bytes(pdf_bytes: bytes) -> List[DrawRecord]:
     for i in range(common, len(draw_rows)):
         records.append(DrawRecord(draw_no=None, numbers=draw_rows[i]))
 
-    unique_records = []
+    # Deduplikacja po samych liczbach
+    unique_records: List[DrawRecord] = []
     seen = set()
+
     for rec in records:
         key = tuple(rec.numbers)
         if key not in seen:
@@ -211,10 +273,6 @@ def hot_and_cold_lists(draws: List[List[int]], top_n: int = 10) -> Tuple[List[in
 # COME BACK CYCLE ENGINE
 # =========================================================
 def build_occurrence_positions(draws: List[List[int]]) -> Dict[int, List[int]]:
-    """
-    Pozycje indeksów losowań, w których wystąpiła liczba.
-    0 = najnowsze losowanie.
-    """
     positions = defaultdict(list)
     for idx, draw in enumerate(draws):
         for n in draw:
@@ -230,6 +288,7 @@ def build_gap_history(draws: List[List[int]]) -> Dict[int, List[int]]:
         pos = positions.get(n, [])
         if len(pos) < 2:
             continue
+
         for i in range(len(pos) - 1):
             gap = pos[i + 1] - pos[i]
             gaps[n].append(gap)
@@ -245,7 +304,6 @@ def comeback_cycle_score(number: int, draws: List[List[int]]) -> float:
     gap_list = gaps.get(number, [])
 
     if not gap_list:
-        # brak historii -> neutralny score
         if 8 <= current_gap <= 28:
             return 0.75
         if 5 <= current_gap <= 35:
@@ -256,7 +314,6 @@ def comeback_cycle_score(number: int, draws: List[List[int]]) -> float:
     gap_min = min(gap_list)
     gap_max = max(gap_list)
 
-    # zgodność z typowym cyklem
     distance = abs(current_gap - avg_gap)
     normalized_distance = distance / max(1.0, avg_gap)
 
@@ -269,7 +326,6 @@ def comeback_cycle_score(number: int, draws: List[List[int]]) -> float:
     else:
         base = 0.35
 
-    # lekkie dociążenie jeśli liczba jest w naturalnym zakresie powrotu
     if gap_min <= current_gap <= gap_max:
         base += 0.08
 
@@ -295,12 +351,14 @@ def positional_frequency(draws: List[List[int]]) -> Dict[int, Counter]:
 def positional_deltas(draws: List[List[int]]) -> Dict[int, Counter]:
     delta_map = {i: Counter() for i in range(DRAW_LEN)}
     sorted_draws = [sorted(d) for d in draws]
+
     for i in range(len(sorted_draws) - 1):
         now = sorted_draws[i]
         nxt = sorted_draws[i + 1]
         for p in range(DRAW_LEN):
             delta = now[p] - nxt[p]
             delta_map[p][delta] += 1
+
     return delta_map
 
 
@@ -312,11 +370,6 @@ def positional_deltas_window(draws: List[List[int]], window: int) -> Dict[int, C
 
 
 def predict_positional_ticket_v2(draws: List[List[int]]) -> List[int]:
-    """
-    Bystrzacha 2.0:
-    - używa delt z okien 25 / 50 / 100
-    - miesza top delty z wagami
-    """
     if not draws:
         return []
 
@@ -761,10 +814,6 @@ def diversity_select(
     ranked_candidates: List[Tuple[List[int], Dict[str, float], str, str]],
     desired_count: int
 ) -> List[Tuple[List[int], Dict[str, float], str, str]]:
-    """
-    Wybiera kupony nie tylko najlepsze scorem,
-    ale też odpowiednio różnorodne.
-    """
     if not ranked_candidates:
         return []
 
@@ -790,7 +839,6 @@ def diversity_select(
         if too_similar:
             continue
 
-        # pilnuj mieszanki profili
         if profiles_count[profile] >= max(2, desired_count // 3):
             continue
 
@@ -800,7 +848,6 @@ def diversity_select(
         if len(selected) >= desired_count:
             break
 
-    # jeśli za mało, dobierz z rankingu
     if len(selected) < desired_count:
         selected_keys = {tuple(x[0]) for x in selected}
         for candidate in ranked_candidates:
@@ -901,13 +948,9 @@ def build_final_ticket_set(
         use_bystrzacha_blend=use_bystrzacha_blend
     )
 
-    # etap 1: top 100
     top_pool = ranked[:100]
-
-    # etap 2: diversity selector
     diverse = diversity_select(top_pool, desired_count=final_count)
 
-    # etap 3: dołóż "złoty strzał"
     if ranked:
         gold = max(
             ranked[:50],
@@ -1194,8 +1237,14 @@ def main():
 
     draws_all = get_draws(records)
 
+    # DEBUG
+    st.write("DEBUG - liczba rekordów:", len(records))
+    st.write("DEBUG - liczba poprawnych losowań:", len(draws_all))
+    if records[:5]:
+        st.write("DEBUG - pierwsze rekordy:", records[:5])
+
     if not draws_all:
-        st.error("Nie udało się odczytać poprawnych losowań z PDF.")
+        st.error("Nie udało się odczytać poprawnych losowań z PDF. Parser nie znalazł wierszy z 6 liczbami Lotto.")
         st.stop()
 
     draws = draws_all[:analysis_window]
