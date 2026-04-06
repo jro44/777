@@ -14,7 +14,7 @@ import streamlit as st
 # KONFIGURACJA
 # =========================================================
 APP_TITLE = "🎯 Lotto ULTRA PRO MAX 6/49"
-APP_SUBTITLE = "PDF Analyzer + Comeback Cycle + Bystrzacha 2.0 + Tournament Scoring + Diversity Selector"
+APP_SUBTITLE = "FAST ENGINE + PDF Analyzer + Comeback Cycle + Bystrzacha 2.0 + Tournament Scoring + Diversity Selector"
 
 MIN_N = 1
 MAX_N = 49
@@ -35,6 +35,34 @@ st.set_page_config(
 class DrawRecord:
     draw_no: Optional[int]
     numbers: List[int]
+
+
+@dataclass
+class PrecomputedStats:
+    draws: List[List[int]]
+    last_draw: List[int]
+    freq_all: Counter
+    freq_12: Counter
+    freq_25: Counter
+    freq_50: Counter
+    freq_100: Counter
+    freq_250: Counter
+    last_seen: Dict[int, int]
+    comeback_scores: Dict[int, float]
+    number_scores: Dict[int, float]
+    pos_freq: Dict[int, Counter]
+    delta_25: Dict[int, Counter]
+    delta_50: Dict[int, Counter]
+    delta_100: Dict[int, Counter]
+    bystrzacha_ticket: List[int]
+    pair_all: Counter
+    pair_50: Counter
+    triplet_all: Counter
+    triplet_100: Counter
+    pair_max_all: int
+    triplet_max_all: int
+    hot_list: List[int]
+    cold_list: List[int]
 
 
 # =========================================================
@@ -91,24 +119,14 @@ def overlap_size(a: List[int], b: List[int]) -> int:
     return len(set(a) & set(b))
 
 
-def ticket_distance(a: List[int], b: List[int]) -> int:
-    return len(set(a) ^ set(b))
-
-
 # =========================================================
-# PARSER PDF - WERSJA NAPRAWIONA
+# PARSER PDF
 # =========================================================
 DRAW_LINE_RE = re.compile(r"^\s*(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s*$")
 DRAW_NO_RE = re.compile(r"^\d{4,5}$")
 
 
 def parse_rows_from_text_layer(pdf_bytes: bytes) -> List[List[str]]:
-    """
-    Najpewniejsza droga dla tego PDF:
-    get_text("text") zwraca gotowe linie jak:
-    03 06 12 26 27 49
-    7335
-    """
     rows: List[List[str]] = []
 
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
@@ -127,9 +145,6 @@ def parse_rows_from_text_layer(pdf_bytes: bytes) -> List[List[str]]:
 
 
 def parse_rows_from_blocks(pdf_bytes: bytes) -> List[List[str]]:
-    """
-    Fallback 2: bloki tekstowe.
-    """
     rows: List[List[str]] = []
 
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
@@ -155,9 +170,6 @@ def parse_rows_from_blocks(pdf_bytes: bytes) -> List[List[str]]:
 
 
 def parse_rows_from_words(pdf_bytes: bytes) -> List[List[str]]:
-    """
-    Fallback 3: słowa z pozycjami.
-    """
     rows: List[List[str]] = []
 
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
@@ -205,7 +217,6 @@ def extract_draws_and_numbers_from_rows(rows: List[List[str]]) -> Tuple[List[Lis
         if "lotto" in joined_lower:
             continue
 
-        # przypadek idealny: dokładnie 6 liczb w linii
         m = DRAW_LINE_RE.match(joined)
         if m:
             nums = [int(x) for x in m.groups()]
@@ -214,14 +225,12 @@ def extract_draws_and_numbers_from_rows(rows: List[List[str]]) -> Tuple[List[Lis
                 draw_rows.append(nums)
             continue
 
-        # przypadek pojedynczego numeru losowania
         if DRAW_NO_RE.fullmatch(joined):
             n = int(joined)
             if n > MAX_N:
                 draw_numbers.append(n)
             continue
 
-        # fallback: wyciągnij wszystkie tokeny numeryczne
         numeric_tokens: List[int] = []
         for t in cleaned:
             if re.fullmatch(r"\d{1,5}", t):
@@ -245,20 +254,10 @@ def extract_draws_and_numbers_from_rows(rows: List[List[str]]) -> Tuple[List[Lis
 
 
 def score_parse_result(draw_rows: List[List[int]], draw_numbers: List[int]) -> int:
-    """
-    Wybieramy najlepszy parser po liczbie wykrytych losowań.
-    """
     return len(draw_rows) * 10 + min(len(draw_rows), len(draw_numbers))
 
 
 def parse_lotto_pdf_bytes(pdf_bytes: bytes) -> List[DrawRecord]:
-    """
-    Parser wielotorowy:
-    1) text
-    2) blocks
-    3) words
-    Bierzemy najlepszy wynik.
-    """
     candidates = []
 
     for parser_name, parser_fn in [
@@ -273,8 +272,6 @@ def parse_lotto_pdf_bytes(pdf_bytes: bytes) -> List[DrawRecord]:
         except Exception:
             candidates.append((parser_name, [], [], []))
 
-    best_name = None
-    best_rows = []
     best_draw_rows = []
     best_draw_numbers = []
     best_score = -1
@@ -283,8 +280,6 @@ def parse_lotto_pdf_bytes(pdf_bytes: bytes) -> List[DrawRecord]:
         current_score = score_parse_result(draw_rows, draw_numbers)
         if current_score > best_score:
             best_score = current_score
-            best_name = parser_name
-            best_rows = rows
             best_draw_rows = draw_rows
             best_draw_numbers = draw_numbers
 
@@ -297,7 +292,6 @@ def parse_lotto_pdf_bytes(pdf_bytes: bytes) -> List[DrawRecord]:
     for i in range(common, len(best_draw_rows)):
         records.append(DrawRecord(draw_no=None, numbers=best_draw_rows[i]))
 
-    # deduplikacja po liczbach
     unique_records: List[DrawRecord] = []
     seen = set()
     for rec in records:
@@ -314,7 +308,7 @@ def get_draws(records: List[DrawRecord]) -> List[List[int]]:
 
 
 # =========================================================
-# ANALIZA CZĘSTOTLIWOŚCI
+# ANALIZA
 # =========================================================
 def frequency(draws: List[List[int]]) -> Counter:
     c = Counter()
@@ -336,28 +330,6 @@ def last_seen_index(draws: List[List[int]]) -> Dict[int, int]:
     return result
 
 
-def hot_and_cold_lists(draws: List[List[int]], top_n: int = 10) -> Tuple[List[int], List[int]]:
-    freq_all = frequency(draws)
-    seen = last_seen_index(draws)
-
-    hot = sorted(
-        range(MIN_N, MAX_N + 1),
-        key=lambda x: (freq_all[x], -x),
-        reverse=True
-    )[:top_n]
-
-    cold = sorted(
-        range(MIN_N, MAX_N + 1),
-        key=lambda x: (seen[x], -freq_all[x]),
-        reverse=True
-    )[:top_n]
-
-    return hot, cold
-
-
-# =========================================================
-# COME BACK CYCLE ENGINE
-# =========================================================
 def build_occurrence_positions(draws: List[List[int]]) -> Dict[int, List[int]]:
     positions = defaultdict(list)
     for idx, draw in enumerate(draws):
@@ -382,49 +354,6 @@ def build_gap_history(draws: List[List[int]]) -> Dict[int, List[int]]:
     return gaps
 
 
-def comeback_cycle_score(number: int, draws: List[List[int]]) -> float:
-    gaps = build_gap_history(draws)
-    last_seen = last_seen_index(draws)
-
-    current_gap = last_seen[number]
-    gap_list = gaps.get(number, [])
-
-    if not gap_list:
-        if 8 <= current_gap <= 28:
-            return 0.75
-        if 5 <= current_gap <= 35:
-            return 0.55
-        return 0.30
-
-    avg_gap = sum(gap_list) / len(gap_list)
-    gap_min = min(gap_list)
-    gap_max = max(gap_list)
-
-    distance = abs(current_gap - avg_gap)
-    normalized_distance = distance / max(1.0, avg_gap)
-
-    if normalized_distance <= 0.15:
-        base = 1.00
-    elif normalized_distance <= 0.30:
-        base = 0.82
-    elif normalized_distance <= 0.50:
-        base = 0.62
-    else:
-        base = 0.35
-
-    if gap_min <= current_gap <= gap_max:
-        base += 0.08
-
-    return min(base, 1.0)
-
-
-def all_comeback_scores(draws: List[List[int]]) -> Dict[int, float]:
-    return {n: comeback_cycle_score(n, draws) for n in range(MIN_N, MAX_N + 1)}
-
-
-# =========================================================
-# BYSTRZACHA 2.0
-# =========================================================
 def positional_frequency(draws: List[List[int]]) -> Dict[int, Counter]:
     pos = {i: Counter() for i in range(DRAW_LEN)}
     for d in draws:
@@ -455,15 +384,23 @@ def positional_deltas_window(draws: List[List[int]], window: int) -> Dict[int, C
     return positional_deltas(subset)
 
 
-def predict_positional_ticket_v2(draws: List[List[int]]) -> List[int]:
-    if not draws:
-        return []
+def strongest_pairs(draws: List[List[int]]) -> Counter:
+    c = Counter()
+    for d in draws:
+        for pair in combinations(sorted(d), 2):
+            c[pair] += 1
+    return c
 
-    last_draw = sorted(draws[0])
-    d25 = positional_deltas_window(draws, min(25, len(draws)))
-    d50 = positional_deltas_window(draws, min(50, len(draws)))
-    d100 = positional_deltas_window(draws, min(100, len(draws)))
 
+def strongest_triplets(draws: List[List[int]]) -> Counter:
+    c = Counter()
+    for d in draws:
+        for tri in combinations(sorted(d), 3):
+            c[tri] += 1
+    return c
+
+
+def predict_positional_ticket_v2_from_stats(last_draw: List[int], d25: Dict[int, Counter], d50: Dict[int, Counter], d100: Dict[int, Counter]) -> List[int]:
     predicted = []
 
     for pos in range(DRAW_LEN):
@@ -504,92 +441,56 @@ def predict_positional_ticket_v2(draws: List[List[int]]) -> List[int]:
     return sorted(fixed)
 
 
-def positional_trend_score(ticket: List[int], draws: List[List[int]]) -> float:
-    pos_freq = positional_frequency(draws)
-    ticket_sorted = sorted(ticket)
-    vals = []
-
-    for i, n in enumerate(ticket_sorted):
-        count = pos_freq[i][n]
-        denom = max(1, sum(pos_freq[i].values()))
-        vals.append(count / denom)
-
-    return sum(vals) / len(vals)
-
-
-# =========================================================
-# PARY I TRÓJKI
-# =========================================================
-def strongest_pairs(draws: List[List[int]]) -> Counter:
-    c = Counter()
-    for d in draws:
-        for pair in combinations(sorted(d), 2):
-            c[pair] += 1
-    return c
-
-
-def strongest_triplets(draws: List[List[int]]) -> Counter:
-    c = Counter()
-    for d in draws:
-        for tri in combinations(sorted(d), 3):
-            c[tri] += 1
-    return c
-
-
-def strongest_pairs_window(draws: List[List[int]], window: int) -> Counter:
-    return strongest_pairs(draws[:window])
-
-
-def strongest_triplets_window(draws: List[List[int]], window: int) -> Counter:
-    return strongest_triplets(draws[:window])
-
-
-def pair_strength_score(ticket: List[int], draws: List[List[int]]) -> float:
-    all_pairs = strongest_pairs(draws)
-    recent_pairs = strongest_pairs_window(draws, min(50, len(draws)))
-
-    vals = []
-    for p in combinations(sorted(ticket), 2):
-        vals.append((all_pairs[p] * 0.55) + (recent_pairs[p] * 0.45))
-
-    if not vals:
-        return 0.0
-
-    max_reference = max(all_pairs.values()) if all_pairs else 1
-    return (sum(vals) / len(vals)) / max(1, max_reference)
-
-
-def triplet_strength_score(ticket: List[int], draws: List[List[int]]) -> float:
-    all_tr = strongest_triplets(draws)
-    recent_tr = strongest_triplets_window(draws, min(100, len(draws)))
-
-    vals = []
-    for t in combinations(sorted(ticket), 3):
-        vals.append((all_tr[t] * 0.60) + (recent_tr[t] * 0.40))
-
-    if not vals:
-        return 0.0
-
-    max_reference = max(all_tr.values()) if all_tr else 1
-    return (sum(vals) / len(vals)) / max(1, max_reference)
-
-
-# =========================================================
-# NUMBER SCORE
-# =========================================================
-def number_scores(draws: List[List[int]]) -> Dict[int, float]:
+def build_precomputed_stats(draws: List[List[int]]) -> PrecomputedStats:
     total = len(draws)
+    last_draw = draws[0]
 
+    freq_all = frequency(draws)
     freq_12 = rolling_frequency(draws, min(12, total))
     freq_25 = rolling_frequency(draws, min(25, total))
     freq_50 = rolling_frequency(draws, min(50, total))
     freq_100 = rolling_frequency(draws, min(100, total))
     freq_250 = rolling_frequency(draws, min(250, total))
-    freq_all = frequency(draws)
 
-    comeback_scores = all_comeback_scores(draws)
+    last_seen = last_seen_index(draws)
+    gap_history = build_gap_history(draws)
 
-    result = {}
+    comeback_scores: Dict[int, float] = {}
+    for number in range(MIN_N, MAX_N + 1):
+        current_gap = last_seen[number]
+        gap_list = gap_history.get(number, [])
+
+        if not gap_list:
+            if 8 <= current_gap <= 28:
+                comeback_scores[number] = 0.75
+            elif 5 <= current_gap <= 35:
+                comeback_scores[number] = 0.55
+            else:
+                comeback_scores[number] = 0.30
+            continue
+
+        avg_gap = sum(gap_list) / len(gap_list)
+        gap_min = min(gap_list)
+        gap_max = max(gap_list)
+
+        distance = abs(current_gap - avg_gap)
+        normalized_distance = distance / max(1.0, avg_gap)
+
+        if normalized_distance <= 0.15:
+            base = 1.00
+        elif normalized_distance <= 0.30:
+            base = 0.82
+        elif normalized_distance <= 0.50:
+            base = 0.62
+        else:
+            base = 0.35
+
+        if gap_min <= current_gap <= gap_max:
+            base += 0.08
+
+        comeback_scores[number] = min(base, 1.0)
+
+    number_scores: Dict[int, float] = {}
     for n in range(MIN_N, MAX_N + 1):
         s12 = freq_12[n] / max(1, min(12, total))
         s25 = freq_25[n] / max(1, min(25, total))
@@ -599,7 +500,7 @@ def number_scores(draws: List[List[int]]) -> Dict[int, float]:
         sall = freq_all[n] / max(1, total)
         comeback = comeback_scores[n]
 
-        result[n] = (
+        number_scores[n] = (
             0.10 * s12 +
             0.14 * s25 +
             0.18 * s50 +
@@ -609,7 +510,58 @@ def number_scores(draws: List[List[int]]) -> Dict[int, float]:
             0.15 * comeback
         )
 
-    return result
+    pos_freq = positional_frequency(draws)
+    delta_25 = positional_deltas_window(draws, min(25, total))
+    delta_50 = positional_deltas_window(draws, min(50, total))
+    delta_100 = positional_deltas_window(draws, min(100, total))
+    bystrzacha_ticket = predict_positional_ticket_v2_from_stats(sorted(last_draw), delta_25, delta_50, delta_100)
+
+    pair_all = strongest_pairs(draws)
+    pair_50 = strongest_pairs(draws[:min(50, total)])
+    triplet_all = strongest_triplets(draws)
+    triplet_100 = strongest_triplets(draws[:min(100, total)])
+
+    pair_max_all = max(pair_all.values()) if pair_all else 1
+    triplet_max_all = max(triplet_all.values()) if triplet_all else 1
+
+    hot_list = sorted(
+        range(MIN_N, MAX_N + 1),
+        key=lambda x: (freq_all[x], -x),
+        reverse=True
+    )[:10]
+
+    cold_list = sorted(
+        range(MIN_N, MAX_N + 1),
+        key=lambda x: (last_seen[x], -freq_all[x]),
+        reverse=True
+    )[:10]
+
+    return PrecomputedStats(
+        draws=draws,
+        last_draw=last_draw,
+        freq_all=freq_all,
+        freq_12=freq_12,
+        freq_25=freq_25,
+        freq_50=freq_50,
+        freq_100=freq_100,
+        freq_250=freq_250,
+        last_seen=last_seen,
+        comeback_scores=comeback_scores,
+        number_scores=number_scores,
+        pos_freq=pos_freq,
+        delta_25=delta_25,
+        delta_50=delta_50,
+        delta_100=delta_100,
+        bystrzacha_ticket=bystrzacha_ticket,
+        pair_all=pair_all,
+        pair_50=pair_50,
+        triplet_all=triplet_all,
+        triplet_100=triplet_100,
+        pair_max_all=pair_max_all,
+        triplet_max_all=triplet_max_all,
+        hot_list=hot_list,
+        cold_list=cold_list,
+    )
 
 
 # =========================================================
@@ -718,7 +670,7 @@ def ticket_passes_hard_filters(ticket: List[int], last_draw: List[int]) -> bool:
 
 
 # =========================================================
-# GENEROWANIE KANDYDATÓW
+# FAST ENGINE
 # =========================================================
 def weighted_pick_unique(pool: List[int], weights: Dict[int, float], k: int) -> List[int]:
     left = pool[:]
@@ -733,16 +685,11 @@ def weighted_pick_unique(pool: List[int], weights: Dict[int, float], k: int) -> 
     return sorted(out)
 
 
-def build_candidate_ticket(draws: List[List[int]], mode: str = "hybrid") -> List[int]:
-    scores = number_scores(draws)
-    seen = last_seen_index(draws)
-    byst = predict_positional_ticket_v2(draws)
-
-    ranked = sorted(range(MIN_N, MAX_N + 1), key=lambda x: scores[x], reverse=True)
-
+def build_candidate_ticket(stats: PrecomputedStats, mode: str = "hybrid") -> List[int]:
+    ranked = sorted(range(MIN_N, MAX_N + 1), key=lambda x: stats.number_scores[x], reverse=True)
     hot = ranked[:15]
     mid = ranked[15:34]
-    cold = sorted(range(MIN_N, MAX_N + 1), key=lambda x: seen[x], reverse=True)[:15]
+    cold = sorted(range(MIN_N, MAX_N + 1), key=lambda x: stats.last_seen[x], reverse=True)[:15]
 
     if mode == "hybrid":
         ticket = []
@@ -758,13 +705,13 @@ def build_candidate_ticket(draws: List[List[int]], mode: str = "hybrid") -> List
     if mode == "comeback":
         comeback_sorted = sorted(
             range(MIN_N, MAX_N + 1),
-            key=lambda x: (comeback_cycle_score(x, draws), scores[x]),
+            key=lambda x: (stats.comeback_scores[x], stats.number_scores[x]),
             reverse=True
         )[:20]
         return sorted(random.sample(comeback_sorted, 6))
 
     if mode == "bystrzacha":
-        base = byst[:]
+        base = stats.bystrzacha_ticket[:]
         while len(base) < 6:
             x = random.randint(MIN_N, MAX_N)
             if x not in base:
@@ -778,12 +725,12 @@ def build_candidate_ticket(draws: List[List[int]], mode: str = "hybrid") -> List
         return sorted(random.sample(cold, 6))
 
     if mode == "weighted":
-        return weighted_pick_unique(list(range(MIN_N, MAX_N + 1)), scores, 6)
+        return weighted_pick_unique(list(range(MIN_N, MAX_N + 1)), stats.number_scores, 6)
 
     if mode == "random":
         return sorted(random.sample(range(MIN_N, MAX_N + 1), 6))
 
-    return weighted_pick_unique(list(range(MIN_N, MAX_N + 1)), scores, 6)
+    return weighted_pick_unique(list(range(MIN_N, MAX_N + 1)), stats.number_scores, 6)
 
 
 def mutate_ticket(ticket: List[int], intensity: int = 1) -> List[int]:
@@ -818,34 +765,54 @@ def crossover_tickets(a: List[int], b: List[int]) -> List[int]:
     return sorted(out)
 
 
-# =========================================================
-# SCORING GŁÓWNY
-# =========================================================
-def score_ticket(ticket: List[int], draws: List[List[int]]) -> Dict[str, float]:
-    total = len(draws)
+def positional_trend_score(ticket: List[int], stats: PrecomputedStats) -> float:
+    ticket_sorted = sorted(ticket)
+    vals = []
 
-    freq_all = frequency(draws)
-    freq_50 = rolling_frequency(draws, min(50, total))
-    freq_100 = rolling_frequency(draws, min(100, total))
-    freq_250 = rolling_frequency(draws, min(250, total))
+    for i, n in enumerate(ticket_sorted):
+        count = stats.pos_freq[i][n]
+        denom = max(1, sum(stats.pos_freq[i].values()))
+        vals.append(count / denom)
 
-    last_draw = draws[0]
+    return sum(vals) / len(vals)
 
-    long_term_score = sum(freq_all[n] for n in ticket) / max(1, total)
+
+def pair_strength_score(ticket: List[int], stats: PrecomputedStats) -> float:
+    vals = []
+    for p in combinations(sorted(ticket), 2):
+        vals.append((stats.pair_all[p] * 0.55) + (stats.pair_50[p] * 0.45))
+    if not vals:
+        return 0.0
+    return (sum(vals) / len(vals)) / max(1, stats.pair_max_all)
+
+
+def triplet_strength_score(ticket: List[int], stats: PrecomputedStats) -> float:
+    vals = []
+    for t in combinations(sorted(ticket), 3):
+        vals.append((stats.triplet_all[t] * 0.60) + (stats.triplet_100[t] * 0.40))
+    if not vals:
+        return 0.0
+    return (sum(vals) / len(vals)) / max(1, stats.triplet_max_all)
+
+
+def score_ticket(ticket: List[int], stats: PrecomputedStats) -> Dict[str, float]:
+    total = len(stats.draws)
+
+    long_term_score = sum(stats.freq_all[n] for n in ticket) / max(1, total)
     medium_term_score = (
-        (sum(freq_250[n] for n in ticket) / max(1, min(250, total))) * 0.55 +
-        (sum(freq_100[n] for n in ticket) / max(1, min(100, total))) * 0.45
+        (sum(stats.freq_250[n] for n in ticket) / max(1, min(250, total))) * 0.55 +
+        (sum(stats.freq_100[n] for n in ticket) / max(1, min(100, total))) * 0.45
     )
-    short_term_score = sum(freq_50[n] for n in ticket) / max(1, min(50, total))
-    comeback_score = sum(comeback_cycle_score(n, draws) for n in ticket) / DRAW_LEN
-    positional_score = positional_trend_score(ticket, draws)
-    pair_score = pair_strength_score(ticket, draws)
-    triplet_score = triplet_strength_score(ticket, draws)
-    structural_score = ticket_balance_score(ticket, last_draw)
+    short_term_score = sum(stats.freq_50[n] for n in ticket) / max(1, min(50, total))
+    comeback_score = sum(stats.comeback_scores[n] for n in ticket) / DRAW_LEN
+    positional_score = positional_trend_score(ticket, stats)
+    pair_score = pair_strength_score(ticket, stats)
+    triplet_score = triplet_strength_score(ticket, stats)
+    structural_score = ticket_balance_score(ticket, stats.last_draw)
 
     penalties = 0.0
     penalties += max(0.0, -consecutive_penalty(ticket)) * 0.08
-    penalties += max(0.0, -repeat_penalty(ticket, last_draw)) * 0.05
+    penalties += max(0.0, -repeat_penalty(ticket, stats.last_draw)) * 0.05
 
     final_score = (
         0.18 * long_term_score +
@@ -872,10 +839,7 @@ def score_ticket(ticket: List[int], draws: List[List[int]]) -> Dict[str, float]:
     }
 
 
-# =========================================================
-# PROFILE KUPONÓW
-# =========================================================
-def classify_ticket(ticket: List[int], metrics: Dict[str, float]) -> str:
+def classify_ticket(metrics: Dict[str, float]) -> str:
     fs = metrics["final_score"]
     comeback = metrics["comeback_score"]
     positional = metrics["positional_score"]
@@ -893,9 +857,6 @@ def classify_ticket(ticket: List[int], metrics: Dict[str, float]) -> str:
     return "mocny"
 
 
-# =========================================================
-# DIVERSITY SELECTOR
-# =========================================================
 def diversity_select(
     ranked_candidates: List[Tuple[List[int], Dict[str, float], str, str]],
     desired_count: int
@@ -946,18 +907,12 @@ def diversity_select(
     return selected[:desired_count]
 
 
-# =========================================================
-# TOURNAMENT SCORING
-# =========================================================
 def generate_tournament_candidates(
-    draws: List[List[int]],
+    stats: PrecomputedStats,
     n_candidates: int,
     modes: List[str],
     use_bystrzacha_blend: bool
 ) -> List[Tuple[List[int], Dict[str, float], str, str]]:
-    last_draw = draws[0]
-    byst = predict_positional_ticket_v2(draws)
-
     raw_candidates = []
     seen = set()
 
@@ -976,10 +931,10 @@ def generate_tournament_candidates(
     random.shuffle(mode_list)
 
     for mode in mode_list:
-        ticket = build_candidate_ticket(draws, mode)
+        ticket = build_candidate_ticket(stats, mode)
 
         if use_bystrzacha_blend and random.random() < 0.22:
-            blend = sorted(set(ticket[:3] + byst[:3]))
+            blend = sorted(set(ticket[:3] + stats.bystrzacha_ticket[:3]))
             while len(blend) < DRAW_LEN:
                 x = random.randint(MIN_N, MAX_N)
                 if x not in blend:
@@ -990,7 +945,7 @@ def generate_tournament_candidates(
             ticket = mutate_ticket(ticket, intensity=random.randint(1, 2))
 
         if random.random() < 0.06:
-            other = build_candidate_ticket(draws, random.choice(modes))
+            other = build_candidate_ticket(stats, random.choice(modes))
             ticket = crossover_tickets(ticket, other)
 
         ticket = sorted(set(ticket))
@@ -1000,7 +955,7 @@ def generate_tournament_candidates(
                 ticket.append(x)
         ticket = sorted(ticket[:DRAW_LEN])
 
-        if not ticket_passes_hard_filters(ticket, last_draw):
+        if not ticket_passes_hard_filters(ticket, stats.last_draw):
             continue
 
         key = tuple(ticket)
@@ -1008,8 +963,8 @@ def generate_tournament_candidates(
             continue
         seen.add(key)
 
-        metrics = score_ticket(ticket, draws)
-        profile = classify_ticket(ticket, metrics)
+        metrics = score_ticket(ticket, stats)
+        profile = classify_ticket(metrics)
 
         raw_candidates.append((ticket, metrics, mode, profile))
 
@@ -1018,8 +973,8 @@ def generate_tournament_candidates(
 
 
 def build_final_ticket_set(
-    draws: List[List[int]],
-    n_candidates: int = 30000,
+    stats: PrecomputedStats,
+    n_candidates: int = 12000,
     final_count: int = 6,
     modes: Optional[List[str]] = None,
     use_bystrzacha_blend: bool = True
@@ -1028,7 +983,7 @@ def build_final_ticket_set(
         modes = ["hybrid", "weighted", "momentum", "comeback", "hot", "cold", "bystrzacha", "random"]
 
     ranked = generate_tournament_candidates(
-        draws=draws,
+        stats=stats,
         n_candidates=n_candidates,
         modes=modes,
         use_bystrzacha_blend=use_bystrzacha_blend
@@ -1075,20 +1030,16 @@ def draws_dataframe(records: List[DrawRecord]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def frequency_dataframe(draws: List[List[int]]) -> pd.DataFrame:
-    freq_all = frequency(draws)
-    seen = last_seen_index(draws)
-    comeback = all_comeback_scores(draws)
-    total = len(draws)
-
+def frequency_dataframe(stats: PrecomputedStats) -> pd.DataFrame:
+    total = len(stats.draws)
     rows = []
     for n in range(MIN_N, MAX_N + 1):
         rows.append({
             "number": n,
-            "count": freq_all[n],
-            "percent": round((freq_all[n] / max(1, total)) * 100, 2),
-            "last_seen_draws_ago": seen[n],
-            "comeback_score": round(comeback[n], 6),
+            "count": stats.freq_all[n],
+            "percent": round((stats.freq_all[n] / max(1, total)) * 100, 2),
+            "last_seen_draws_ago": stats.last_seen[n],
+            "comeback_score": round(stats.comeback_scores[n], 6),
         })
 
     return pd.DataFrame(rows).sort_values(
@@ -1097,11 +1048,10 @@ def frequency_dataframe(draws: List[List[int]]) -> pd.DataFrame:
     )
 
 
-def positional_dataframe(draws: List[List[int]]) -> pd.DataFrame:
-    pos = positional_frequency(draws)
+def positional_dataframe(stats: PrecomputedStats) -> pd.DataFrame:
     rows = []
     for p in range(DRAW_LEN):
-        for number, count in pos[p].most_common(12):
+        for number, count in stats.pos_freq[p].most_common(12):
             rows.append({
                 "position": p + 1,
                 "number": number,
@@ -1110,35 +1060,29 @@ def positional_dataframe(draws: List[List[int]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def bystrzacha_dataframe(draws: List[List[int]]) -> pd.DataFrame:
-    d25 = positional_deltas_window(draws, min(25, len(draws)))
-    d50 = positional_deltas_window(draws, min(50, len(draws)))
-    d100 = positional_deltas_window(draws, min(100, len(draws)))
-
+def bystrzacha_dataframe(stats: PrecomputedStats) -> pd.DataFrame:
     rows = []
     for p in range(DRAW_LEN):
-        for delta, count in d25[p].most_common(5):
+        for delta, count in stats.delta_25[p].most_common(5):
             rows.append({"window": 25, "position": p + 1, "delta": delta, "count": count})
-        for delta, count in d50[p].most_common(5):
+        for delta, count in stats.delta_50[p].most_common(5):
             rows.append({"window": 50, "position": p + 1, "delta": delta, "count": count})
-        for delta, count in d100[p].most_common(5):
+        for delta, count in stats.delta_100[p].most_common(5):
             rows.append({"window": 100, "position": p + 1, "delta": delta, "count": count})
 
     return pd.DataFrame(rows)
 
 
-def pairs_dataframe(draws: List[List[int]], top_n: int = 25) -> pd.DataFrame:
-    pairs = strongest_pairs(draws)
+def pairs_dataframe(stats: PrecomputedStats, top_n: int = 25) -> pd.DataFrame:
     rows = []
-    for (a, b), count in pairs.most_common(top_n):
+    for (a, b), count in stats.pair_all.most_common(top_n):
         rows.append({"a": a, "b": b, "count": count})
     return pd.DataFrame(rows)
 
 
-def triplets_dataframe(draws: List[List[int]], top_n: int = 25) -> pd.DataFrame:
-    tris = strongest_triplets(draws)
+def triplets_dataframe(stats: PrecomputedStats, top_n: int = 25) -> pd.DataFrame:
     rows = []
-    for (a, b, c), count in tris.most_common(top_n):
+    for (a, b, c), count in stats.triplet_all.most_common(top_n):
         rows.append({"a": a, "b": b, "c": c, "count": count})
     return pd.DataFrame(rows)
 
@@ -1160,12 +1104,6 @@ def inject_css():
         }
         h1, h2, h3, h4 {
             color: #f8fafc !important;
-        }
-        .stMetric {
-            background: rgba(255,255,255,0.04);
-            padding: 10px;
-            border-radius: 12px;
-            border: 1px solid rgba(255,255,255,0.08);
         }
         .ticket-card {
             background: rgba(255,255,255,0.05);
@@ -1215,6 +1153,14 @@ def parse_pdf_cached(pdf_bytes: bytes) -> List[DrawRecord]:
     return parse_lotto_pdf_bytes(pdf_bytes)
 
 
+@st.cache_data(show_spinner=True)
+def precompute_stats_cached(records_serialized: Tuple[Tuple[Optional[int], Tuple[int, ...]], ...], analysis_window: int) -> PrecomputedStats:
+    records = [DrawRecord(draw_no=r[0], numbers=list(r[1])) for r in records_serialized]
+    draws_all = get_draws(records)
+    draws = draws_all[:analysis_window]
+    return build_precomputed_stats(draws)
+
+
 # =========================================================
 # UI POMOCNICZE
 # =========================================================
@@ -1244,20 +1190,6 @@ def main():
     st.title(APP_TITLE)
     st.caption(APP_SUBTITLE)
 
-    st.markdown(
-        """
-        Wersja **ULTRA PRO MAX**:
-        - parser PDF,
-        - hot / cold / rolling windows,
-        - **Comeback Cycle Engine**,
-        - **Bystrzacha 2.0**,
-        - analiza par i trójek,
-        - **Tournament Scoring**,
-        - **Diversity Selector**,
-        - profile kuponów: stabilny / momentum / agresywny / złoty strzał.
-        """
-    )
-
     with st.sidebar:
         st.header("⚙️ Ustawienia")
 
@@ -1274,9 +1206,9 @@ def main():
 
         candidate_pool = st.slider(
             "Pula kandydatów w turnieju",
-            min_value=5000,
-            max_value=50000,
-            value=30000,
+            min_value=2000,
+            max_value=20000,
+            value=8000,
             step=1000,
         )
 
@@ -1291,7 +1223,7 @@ def main():
         chosen_modes = st.multiselect(
             "Tryby źródłowe",
             options=["hybrid", "weighted", "momentum", "comeback", "hot", "cold", "bystrzacha", "random"],
-            default=["hybrid", "weighted", "momentum", "comeback", "hot", "cold", "bystrzacha", "random"],
+            default=["hybrid", "weighted", "momentum", "comeback", "hot", "cold", "bystrzacha"],
         )
 
         use_bystrzacha_blend = st.checkbox("Domieszka Bystrzachy 2.0", value=True)
@@ -1301,7 +1233,7 @@ def main():
         if custom_seed:
             seed_value = st.number_input("Seed", min_value=0, max_value=999999999, value=12345, step=1)
 
-        run_button = st.button("🚀 Uruchom ULTRA PRO MAX", use_container_width=True)
+        run_button = st.button("🚀 Uruchom ULTRA PRO MAX", width="stretch")
 
     if seed_value is not None:
         random.seed(int(seed_value))
@@ -1318,38 +1250,37 @@ def main():
         st.warning("Wgraj plik PDF albo umieść domyślny plik obok aplikacji.")
         st.stop()
 
-    with st.spinner("Czytam PDF i buduję model..."):
+    with st.spinner("Czytam PDF..."):
         records = parse_pdf_cached(pdf_bytes)
 
     draws_all = get_draws(records)
 
     st.write("DEBUG - liczba rekordów:", len(records))
     st.write("DEBUG - liczba poprawnych losowań:", len(draws_all))
-    if records[:5]:
-        st.write("DEBUG - pierwsze rekordy:", records[:5])
 
     if not draws_all:
-        st.error("Nie udało się odczytać poprawnych losowań z PDF. Parser nie znalazł wierszy z 6 liczbami Lotto.")
+        st.error("Nie udało się odczytać poprawnych losowań z PDF.")
         st.stop()
 
-    draws = draws_all[:analysis_window]
-    records_cut = records[:len(draws)]
+    records_serialized = tuple((r.draw_no, tuple(r.numbers)) for r in records)
 
-    last_draw = draws[0]
-    hot_list, cold_list = hot_and_cold_lists(draws, top_n=10)
-    byst_ticket = predict_positional_ticket_v2(draws)
-    freq_df = frequency_dataframe(draws)
-    pos_df = positional_dataframe(draws)
-    byst_df = bystrzacha_dataframe(draws)
-    pair_df = pairs_dataframe(draws, top_n=25)
-    tri_df = triplets_dataframe(draws, top_n=25)
+    with st.spinner("Liczę statystyki tylko raz..."):
+        stats = precompute_stats_cached(records_serialized, analysis_window)
+
+    records_cut = records[:len(stats.draws)]
+
+    freq_df = frequency_dataframe(stats)
+    pos_df = positional_dataframe(stats)
+    byst_df = bystrzacha_dataframe(stats)
+    pair_df = pairs_dataframe(stats, top_n=25)
+    tri_df = triplets_dataframe(stats, top_n=25)
     raw_df = draws_dataframe(records_cut)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Odczytane losowania", len(draws_all))
-    c2.metric("Analizowane losowania", len(draws))
-    c3.metric("Ostatnie losowanie", ticket_to_text(last_draw))
-    c4.metric("Bystrzacha 2.0", ticket_to_text(byst_ticket))
+    c2.metric("Analizowane losowania", len(stats.draws))
+    c3.metric("Ostatnie losowanie", ticket_to_text(stats.last_draw))
+    c4.metric("Bystrzacha 2.0", ticket_to_text(stats.bystrzacha_ticket))
 
     tabs = st.tabs([
         "🎟️ Generator",
@@ -1366,7 +1297,7 @@ def main():
         if run_button:
             with st.spinner("Trwa turniej kandydatów i wybór najlepszych kuponów..."):
                 results = build_final_ticket_set(
-                    draws=draws,
+                    stats=stats,
                     n_candidates=candidate_pool,
                     final_count=final_count,
                     modes=chosen_modes if chosen_modes else None,
@@ -1402,7 +1333,7 @@ def main():
                     )
 
                 result_df = build_result_dataframe(results)
-                st.dataframe(result_df, use_container_width=True)
+                st.dataframe(result_df, width="stretch")
 
                 txt_output = "\n".join(
                     f"{i+1:02d}. {ticket_to_text(ticket)} | {profile} | mode={mode} | score={metrics['final_score']}"
@@ -1414,7 +1345,7 @@ def main():
                     data=txt_output.encode("utf-8"),
                     file_name="lotto_ultra_pro_max_tickets.txt",
                     mime="text/plain",
-                    use_container_width=True,
+                    width="stretch",
                 )
 
                 csv_output = result_df.to_csv(index=False).encode("utf-8")
@@ -1423,9 +1354,8 @@ def main():
                     data=csv_output,
                     file_name="lotto_ultra_pro_max_ranking.csv",
                     mime="text/csv",
-                    use_container_width=True,
+                    width="stretch",
                 )
-
         else:
             st.info("Ustaw parametry po lewej i kliknij „Uruchom ULTRA PRO MAX”.")
 
@@ -1433,18 +1363,17 @@ def main():
         a, b, c = st.columns(3)
         with a:
             st.write("**Hot 10**")
-            st.write(", ".join(f"{x:02d}" for x in hot_list))
+            st.write(", ".join(f"{x:02d}" for x in stats.hot_list))
         with b:
             st.write("**Cold 10**")
-            st.write(", ".join(f"{x:02d}" for x in cold_list))
+            st.write(", ".join(f"{x:02d}" for x in stats.cold_list))
         with c:
             st.write("**Bystrzacha 2.0**")
-            st.write(", ".join(f"{x:02d}" for x in byst_ticket))
+            st.write(", ".join(f"{x:02d}" for x in stats.bystrzacha_ticket))
 
     with tabs[1]:
         st.subheader("Częstotliwość liczb")
-        st.dataframe(freq_df, use_container_width=True)
-
+        st.dataframe(freq_df, width="stretch")
         chart_df = freq_df.sort_values("number").set_index("number")
         st.bar_chart(chart_df["count"])
 
@@ -1454,58 +1383,44 @@ def main():
         left, right = st.columns(2)
         with left:
             st.markdown("### 🔥 Hot 10")
-            for i, n in enumerate(hot_list, start=1):
+            for i, n in enumerate(stats.hot_list, start=1):
                 st.write(f"{i}. {n:02d}")
 
         with right:
             st.markdown("### ❄️ Cold 10")
-            for i, n in enumerate(cold_list, start=1):
+            for i, n in enumerate(stats.cold_list, start=1):
                 st.write(f"{i}. {n:02d}")
-
-        st.markdown("### Number Score + Comeback Score")
-        ns = number_scores(draws)
-        comeback = all_comeback_scores(draws)
 
         ns_df = pd.DataFrame(
             [
                 {
                     "number": n,
-                    "number_score": round(ns[n], 6),
-                    "comeback_score": round(comeback[n], 6),
+                    "number_score": round(stats.number_scores[n], 6),
+                    "comeback_score": round(stats.comeback_scores[n], 6),
                 }
                 for n in range(MIN_N, MAX_N + 1)
             ]
         ).sort_values(by=["number_score", "comeback_score"], ascending=False)
 
-        st.dataframe(ns_df, use_container_width=True)
+        st.dataframe(ns_df, width="stretch")
 
     with tabs[3]:
         st.subheader("Bystrzacha 2.0")
-
-        st.markdown("### Prognoza pozycyjna")
-        st.code(ticket_to_text(byst_ticket))
-
-        st.markdown("### Najczęstsze liczby na pozycjach")
-        st.dataframe(pos_df, use_container_width=True)
-
-        st.markdown("### Najczęstsze delty w oknach 25 / 50 / 100")
-        st.dataframe(byst_df, use_container_width=True)
+        st.code(ticket_to_text(stats.bystrzacha_ticket))
+        st.dataframe(pos_df, width="stretch")
+        st.dataframe(byst_df, width="stretch")
 
     with tabs[4]:
         st.subheader("Pary i trójki")
-
         left, right = st.columns(2)
         with left:
-            st.markdown("### Top pary")
-            st.dataframe(pair_df, use_container_width=True)
-
+            st.dataframe(pair_df, width="stretch")
         with right:
-            st.markdown("### Top trójki")
-            st.dataframe(tri_df, use_container_width=True)
+            st.dataframe(tri_df, width="stretch")
 
     with tabs[5]:
         st.subheader("Surowe dane losowań")
-        st.dataframe(raw_df, use_container_width=True)
+        st.dataframe(raw_df, width="stretch")
 
         csv_data = raw_df.to_csv(index=False).encode("utf-8")
         st.download_button(
@@ -1513,7 +1428,7 @@ def main():
             data=csv_data,
             file_name="lotto_draws.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
         )
 
 
